@@ -1,0 +1,33 @@
+﻿{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "0.0.1",
+    "FriendlyName": "Cirrova",
+    "Description": "",
+    "Category": "Other",
+    "CreatedBy": "TrifingZW",
+    "CreatedByURL": "",
+    "DocsURL": "",
+    "MarketplaceURL": "",
+    "CanContainContent": true,
+    "IsBetaVersion": true,
+    "IsExperimentalVersion": true,
+    "Installed": false,
+    "Modules": [
+        {
+            "Name": "Cirrova",
+            "Type": "Runtime",
+            "LoadingPhase": "Default"
+        },
+        {
+            "Name": "CirrovaEngine",
+            "Type": "Runtime",
+            "LoadingPhase": "Default"
+        },
+        {
+            "Name": "CirrovaControl",
+            "Type": "Runtime",
+            "LoadingPhase": "Default"
+        }
+    ]
+}
