@@ -2,16 +2,10 @@
 
 #define LOCTEXT_NAMESPACE "FCirrovaControlModule"
 
-void FCirrovaControlModule::StartupModule()
-{
-    
-}
+void FCirrovaControlModule::StartupModule() {}
 
-void FCirrovaControlModule::ShutdownModule()
-{
-    
-}
+void FCirrovaControlModule::ShutdownModule() {}
 
 #undef LOCTEXT_NAMESPACE
-    
+
 IMPLEMENT_MODULE(FCirrovaControlModule, CirrovaControl)
