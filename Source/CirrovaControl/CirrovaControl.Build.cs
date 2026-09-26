@@ -15,7 +15,11 @@ public class CirrovaControl : ModuleRules
 				"InputCore",
 				"EnhancedInput",
 
-				"GameplayTags"
+				"GameplayTags",
+
+				"ChaosVehiclesCore",
+
+				"SingularisMorphVehicle"
 			]
 		);
 	}
