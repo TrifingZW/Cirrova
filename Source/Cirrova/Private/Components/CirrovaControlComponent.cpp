@@ -1,10 +1,10 @@
 ﻿#include "Components/CirrovaControlComponent.h"
 
-#include <Components/SingularisMorphVehicleSimulationComponent.h>
 #include <EnhancedInputComponent.h>
 #include <EnhancedInputSubsystems.h>
-#include <GameFramework/PlayerController.h>
 #include <InputMappingContext.h>
+#include <Components/SingularisMorphVehicleSimulationComponent.h>
+#include <GameFramework/PlayerController.h>
 #include <UObject/ConstructorHelpers.h>
 
 UCirrovaControlComponent::UCirrovaControlComponent()
@@ -43,23 +43,52 @@ void UCirrovaControlComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// 1) 契约校验：组件必须挂载于 PlayerController
 	checkf(
 		GetOwner()->IsA<APlayerController>(),
 		TEXT("CirrovaControlComponent: Owner is not PlayerController")
 	);
 
+	// 2) 缓存本地控制器
 	OwnerPlayerController = Cast<APlayerController>(GetOwner());
 
+	// 3) 绑定输入动作
 	BindInput();
 }
 
-void UCirrovaControlComponent::SetControlled(AActor* Vehicle)
+void UCirrovaControlComponent::Control(AActor* Vehicle)
 {
+	if (Controlled() || !IsValid(Vehicle)) return;
+
+	SetVehicle(Vehicle);
+}
+
+void UCirrovaControlComponent::Release()
+{
+	if (!Controlled()) return;
+
+	SetVehicle(nullptr);
+}
+
+void UCirrovaControlComponent::SetVehicle(AActor* Vehicle)
+{
+	// 1) 本地玩家检查
 	if (!OwnerPlayerController.IsValid() || !OwnerPlayerController->IsLocalController()) return;
 
+	// 2) 幂等性检查，若状态未变更则直接返回
 	if (ControlledVehicle == Vehicle) return;
+
+	// 3) 捕获旧状态后写入新状态
+	const AActor* OldVehicle = ControlledVehicle.Get();
 	ControlledVehicle = Vehicle;
 
+	// 4) 响应式编程：应用副作用
+	ApplyVehicle(OldVehicle);
+}
+
+void UCirrovaControlComponent::ApplyVehicle(const AActor* OldVehicle) const
+{
+	// 输入映射上下文随受控状态注册或移除
 	RefreshInput();
 }
 
@@ -122,19 +151,21 @@ void UCirrovaControlComponent::HandleHandbrakeCompleted(const FInputActionValue&
 
 void UCirrovaControlComponent::BindInput()
 {
+	// 1) 卫语句：仅本地控制器可绑定输入
 	if (!OwnerPlayerController.IsValid() || !OwnerPlayerController->IsLocalController()) return;
 
-	// 任一输入动作资产缺失时放弃整体绑定，避免运行期逐条告警
+	// 2) 卫语句：任一输入动作资产缺失时放弃整体绑定，避免运行期逐条告警
 	if (!IsValid(SteeringInputAction) || !IsValid(ThrottleInputAction) ||
 		!IsValid(BrakeInputAction) || !IsValid(HandbrakeInputAction))
 		return;
 
-	// 绑定输入动作
+	// 3) 卫语句：Owner 未启用 EnhancedInput 时无法绑定
 	UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(
 		OwnerPlayerController->InputComponent
 	);
 	if (!IsValid(EnhancedInputComponent)) return;
 
+	// 4) 逐动作绑定回调
 	// Steering
 	EnhancedInputComponent->BindAction(
 		SteeringInputAction,
@@ -188,13 +219,18 @@ void UCirrovaControlComponent::BindInput()
 
 void UCirrovaControlComponent::RefreshInput() const
 {
+	// 1) 卫语句：仅本地控制器持有 EnhancedInput 子系统
 	if (!OwnerPlayerController.IsValid() || !OwnerPlayerController->IsLocalController()) return;
+
+	// 2) 卫语句：未配置映射上下文时无需处理
 	if (!IsValid(InputMappingContext)) return;
 
+	// 3) 获取本地玩家的 EnhancedInput 子系统
 	UEnhancedInputLocalPlayerSubsystem* Subsystem =
 		ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(OwnerPlayerController->GetLocalPlayer());
 	if (!IsValid(Subsystem)) return;
 
+	// 4) 依据受控状态注册或移除映射上下文
 	if (ControlledVehicle.IsValid())
 		Subsystem->AddMappingContext(InputMappingContext, InputPriority);
 	else
