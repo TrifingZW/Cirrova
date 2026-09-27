@@ -10,7 +10,16 @@ public class Cirrova : ModuleRules
 			[
 				"Core",
 				"CoreUObject",
-				"Engine"
+				"Engine",
+
+				"ChaosVehiclesCore",
+
+				"InputCore",
+				"EnhancedInput",
+
+				"GameplayTags",
+
+				"SingularisMorphVehicle"
 			]
 		);
 	}

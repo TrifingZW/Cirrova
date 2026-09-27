@@ -16,7 +16,7 @@ UCLASS(
 	ClassGroup = ("Cirrova"),
 	meta = (BlueprintSpawnableComponent, DisplayName = "虹涡控制组件")
 )
-class CIRROVACONTROL_API UCirrovaControlComponent : public UActorComponent
+class CIRROVA_API UCirrovaControlComponent : public UActorComponent
 {
 	GENERATED_BODY()
 

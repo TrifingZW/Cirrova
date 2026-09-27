@@ -23,11 +23,6 @@
             "Name": "CirrovaEngine",
             "Type": "Runtime",
             "LoadingPhase": "Default"
-        },
-        {
-            "Name": "CirrovaControl",
-            "Type": "Runtime",
-            "LoadingPhase": "Default"
         }
     ]
 }
