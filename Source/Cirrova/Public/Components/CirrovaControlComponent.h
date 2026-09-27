@@ -74,7 +74,7 @@ public:
 #pragma endregion
 
 private:
-#pragma region Internal Variable
+#pragma region State
 
 	TWeakObjectPtr<APlayerController> OwnerPlayerController = nullptr;
 	TWeakObjectPtr<AActor> ControlledVehicle = nullptr;
