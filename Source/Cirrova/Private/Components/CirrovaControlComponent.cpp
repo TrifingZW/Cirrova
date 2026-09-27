@@ -45,7 +45,7 @@ void UCirrovaControlComponent::BeginPlay()
 
 	checkf(
 		GetOwner()->IsA<APlayerController>(),
-		TEXT("CirrovaControlComponent: Owner not is PlayerController")
+		TEXT("CirrovaControlComponent: Owner is not PlayerController")
 	);
 
 	OwnerPlayerController = Cast<APlayerController>(GetOwner());
