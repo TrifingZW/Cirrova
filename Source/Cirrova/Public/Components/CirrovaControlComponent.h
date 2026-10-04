@@ -121,7 +121,7 @@ public:
 	 */
 	UFUNCTION(
 		BlueprintPure,
-		Category = "引力奇点座位组件|API",
+		Category = "虹涡控制组件|API",
 		meta = (DisplayName = "Controlled")
 	)
 	bool Controlled() const { return ControlledVehicle.IsValid(); }
