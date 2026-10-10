@@ -88,6 +88,22 @@ void UCirrovaControlComponent::SetVehicle(AActor* Vehicle)
 
 void UCirrovaControlComponent::ApplyVehicle(const AActor* OldVehicle) const
 {
+	// 同步本地控制声明：启用网络物理预测时，未标记本地控制的载具，其控制输入会在
+	// 物理线程被网络输入覆盖而完全失效（表现为载具无法控制）
+	if (OldVehicle)
+	{
+		if (USingularisMorphVehicleSimulationComponent* OldSimulation =
+			OldVehicle->FindComponentByClass<USingularisMorphVehicleSimulationComponent>())
+			OldSimulation->SetLocallyControlled(false);
+	}
+
+	if (const AActor* Vehicle = ControlledVehicle.Get())
+	{
+		if (USingularisMorphVehicleSimulationComponent* Simulation =
+			Vehicle->FindComponentByClass<USingularisMorphVehicleSimulationComponent>())
+			Simulation->SetLocallyControlled(true);
+	}
+
 	// 输入映射上下文随受控状态注册或移除
 	RefreshInput();
 }
@@ -96,7 +112,7 @@ void UCirrovaControlComponent::ApplyVehicle(const AActor* OldVehicle) const
 
 void UCirrovaControlComponent::HandleSteering(const FInputActionValue& InputActionValue)
 {
-	USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
+	const USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
 	if (!IsValid(VehicleSimulation)) return;
 
 	VehicleSimulation->SetInputAxis1D(Chaos::SteeringControlName, InputActionValue.Get<float>());
@@ -104,7 +120,7 @@ void UCirrovaControlComponent::HandleSteering(const FInputActionValue& InputActi
 
 void UCirrovaControlComponent::HandleThrottle(const FInputActionValue& InputActionValue)
 {
-	USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
+	const USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
 	if (!IsValid(VehicleSimulation)) return;
 
 	VehicleSimulation->SetInputAxis1D(Chaos::ThrottleControlName, InputActionValue.Get<float>());
@@ -112,7 +128,7 @@ void UCirrovaControlComponent::HandleThrottle(const FInputActionValue& InputActi
 
 void UCirrovaControlComponent::HandleBrakTriggered(const FInputActionValue& InputActionValue)
 {
-	USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
+	const USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
 	if (!IsValid(VehicleSimulation)) return;
 
 	VehicleSimulation->SetInputAxis1D(Chaos::BrakeControlName, InputActionValue.Get<float>());
@@ -125,7 +141,7 @@ void UCirrovaControlComponent::HandleBrakeStarted(const FInputActionValue& Input
 
 void UCirrovaControlComponent::HandleBrakeCompleted(const FInputActionValue& InputActionValue)
 {
-	USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
+	const USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
 	if (!IsValid(VehicleSimulation)) return;
 
 	VehicleSimulation->SetInputAxis1D(Chaos::BrakeControlName, 0.0);
@@ -133,7 +149,7 @@ void UCirrovaControlComponent::HandleBrakeCompleted(const FInputActionValue& Inp
 
 void UCirrovaControlComponent::HandleHandbrakeStarted(const FInputActionValue& InputActionValue)
 {
-	USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
+	const USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
 	if (!IsValid(VehicleSimulation)) return;
 
 	VehicleSimulation->SetInputAxis1D(Chaos::HandbrakeControlName, 1.0);
@@ -141,7 +157,7 @@ void UCirrovaControlComponent::HandleHandbrakeStarted(const FInputActionValue& I
 
 void UCirrovaControlComponent::HandleHandbrakeCompleted(const FInputActionValue& InputActionValue)
 {
-	USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
+	const USingularisMorphVehicleSimulationComponent* VehicleSimulation = FindVehicleSimulation();
 	if (!IsValid(VehicleSimulation)) return;
 
 	VehicleSimulation->SetInputAxis1D(Chaos::HandbrakeControlName, 0.0);
