@@ -9,6 +9,7 @@
 class UInputAction;
 class UInputMappingContext;
 class USingularisMorphVehicleSimulationComponent;
+class USpringArmComponent;
 
 /**
  * 虹涡控制组件。
@@ -48,6 +49,16 @@ public:
 	)
 	UInputMappingContext* InputMappingContext = nullptr;
 
+	/** 视角输入动作 */
+	UPROPERTY(
+		EditDefaultsOnly,
+		BlueprintReadOnly,
+		Category = "虹涡控制组件",
+
+		meta = (DisplayName = "视角输入动作")
+	)
+	UInputAction* LookInputAction = nullptr;
+
 	/** 转向输入动作，写入 Chaos 转向控制轴 */
 	UPROPERTY(
 		EditDefaultsOnly,
@@ -84,6 +95,24 @@ public:
 	)
 	UInputAction* HandbrakeInputAction = nullptr;
 
+	/** 相机臂局部俯仰下限（度） */
+	UPROPERTY(
+		EditDefaultsOnly,
+		BlueprintReadOnly,
+		Category = "虹涡控制组件",
+		meta = (DisplayName = "俯仰下限")
+	)
+	float PitchMin = -70.0f;
+
+	/** 相机臂局部俯仰上限（度） */
+	UPROPERTY(
+		EditDefaultsOnly,
+		BlueprintReadOnly,
+		Category = "虹涡控制组件",
+		meta = (DisplayName = "俯仰上限")
+	)
+	float PitchMax = 70.0f;
+
 #pragma endregion
 
 private:
@@ -94,6 +123,9 @@ private:
 
 	/** 当前受控载具，仅本地控制器可变更 */
 	TWeakObjectPtr<AActor> ControlledVehicle = nullptr;
+
+	/** 组件是否已开启 */
+	bool bIsEnable = true;
 
 #pragma endregion
 
@@ -139,6 +171,18 @@ public:
 	AActor* GetVehicle() const { return ControlledVehicle.Get(); }
 
 	/**
+	 * 组件是否已开启。
+	 *
+	 * @return 已开启时返回 true。
+	 */
+	UFUNCTION(
+		BlueprintPure,
+		Category = "虹涡控制组件|API",
+		meta = (DisplayName = "Enabled")
+	)
+	bool Enabled() const { return bIsEnable; }
+
+	/**
 	 * 开始控制指定载具。
 	 *
 	 * 本地控制器操作。注册输入映射上下文，输入轴直写载具的变型载具仿真组件，
@@ -165,10 +209,37 @@ public:
 	)
 	void Release();
 
+	/**
+	 * 开启组件。
+	 *
+	 * 本地控制器操作。恢复输入处理，已开启时静默忽略。
+	 */
+	UFUNCTION(
+		BlueprintCallable,
+		Category = "虹涡控制组件|API",
+		meta = (DisplayName = "开启")
+	)
+	void Enable();
+
+	/**
+	 * 关闭组件。
+	 *
+	 * 本地控制器操作。接管输入处理而不清除受控状态，已关闭时静默忽略。
+	 */
+	UFUNCTION(
+		BlueprintCallable,
+		Category = "虹涡控制组件|API",
+		meta = (DisplayName = "关闭")
+	)
+	void Disable();
+
 #pragma endregion
 
 private:
 #pragma region Callback
+
+	/** 视角输入触发时在载具本地系内驱动相机臂俯仰与偏航，俯仰按设定范围夹紧 */
+	void HandleLookInputAction(const FInputActionValue& InputActionValue);
 
 	/** 转向输入触发时写入 Chaos 转向控制轴 */
 	void HandleSteering(const FInputActionValue& InputActionValue);
@@ -218,11 +289,34 @@ private:
 	void ApplyVehicle(const AActor* OldVehicle) const;
 
 	/**
+	 * 设置开启状态并应用副作用。
+	 *
+	 * 本地控制器，幂等。先快照旧值，再赋值新值，最后调用 ApplyEnabled。
+	 *
+	 * @param bEnable 新的开启状态。
+	 */
+	void SetEnabled(bool bEnable);
+
+	/**
+	 * 应用开启状态变化到输入映射。
+	 *
+	 * @param bOldEnable 变化前的旧开启状态。
+	 */
+	void ApplyEnabled(bool bOldEnable) const;
+
+	/**
 	 * 解析当前受控载具上的变型载具仿真组件。
 	 *
 	 * @return 受控载具上的仿真组件，非本地控制器或无受控载具时返回 nullptr。
 	 */
 	USingularisMorphVehicleSimulationComponent* FindVehicleSimulation() const;
+
+	/**
+	 * 解析当前受控载具上的相机臂组件。
+	 *
+	 * @return 受控载具上的弹簧臂，非本地控制器或无受控载具时返回 nullptr。
+	 */
+	USpringArmComponent* FindCameraBoom() const;
 
 #pragma endregion
 };

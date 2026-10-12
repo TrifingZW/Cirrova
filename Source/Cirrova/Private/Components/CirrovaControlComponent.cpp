@@ -5,6 +5,7 @@
 #include <InputMappingContext.h>
 #include <Components/SingularisMorphVehicleSimulationComponent.h>
 #include <GameFramework/PlayerController.h>
+#include <GameFramework/SpringArmComponent.h>
 #include <UObject/ConstructorHelpers.h>
 
 UCirrovaControlComponent::UCirrovaControlComponent()
@@ -19,6 +20,9 @@ UCirrovaControlComponent::UCirrovaControlComponent()
 	static const ConstructorHelpers::FObjectFinder<UInputMappingContext> InputMappingContextFinder(
 		TEXT("/Cirrova/Inputs/IMC_Cirrova_Vehicle.IMC_Cirrova_Vehicle")
 	);
+	static const ConstructorHelpers::FObjectFinder<UInputAction> LookInputActionFinder(
+		TEXT("/Cirrova/Inputs/Actions/IA_Look.IA_Look")
+	);
 	static const ConstructorHelpers::FObjectFinder<UInputAction> SteeringInputActionFinder(
 		TEXT("/Cirrova/Inputs/Actions/IA_Steering.IA_Steering")
 	);
@@ -32,11 +36,18 @@ UCirrovaControlComponent::UCirrovaControlComponent()
 		TEXT("/Cirrova/Inputs/Actions/IA_Handbrake.IA_Handbrake")
 	);
 
-	InputMappingContext = InputMappingContextFinder.Object;
-	SteeringInputAction = SteeringInputActionFinder.Object;
-	ThrottleInputAction = ThrottleInputActionFinder.Object;
-	BrakeInputAction = BrakeInputActionFinder.Object;
-	HandbrakeInputAction = HandbrakeInputActionFinder.Object;
+	if (InputMappingContextFinder.Succeeded())
+		InputMappingContext = InputMappingContextFinder.Object;
+	if (LookInputActionFinder.Succeeded())
+		LookInputAction = LookInputActionFinder.Object;
+	if (SteeringInputActionFinder.Succeeded())
+		SteeringInputAction = SteeringInputActionFinder.Object;
+	if (ThrottleInputActionFinder.Succeeded())
+		ThrottleInputAction = ThrottleInputActionFinder.Object;
+	if (BrakeInputActionFinder.Succeeded())
+		BrakeInputAction = BrakeInputActionFinder.Object;
+	if (HandbrakeInputActionFinder.Succeeded())
+		HandbrakeInputAction = HandbrakeInputActionFinder.Object;
 }
 
 void UCirrovaControlComponent::BeginPlay()
@@ -68,6 +79,20 @@ void UCirrovaControlComponent::Release()
 	if (!Controlled()) return;
 
 	SetVehicle(nullptr);
+}
+
+void UCirrovaControlComponent::Enable()
+{
+	if (bIsEnable) return;
+
+	SetEnabled(true);
+}
+
+void UCirrovaControlComponent::Disable()
+{
+	if (!bIsEnable) return;
+
+	SetEnabled(false);
 }
 
 void UCirrovaControlComponent::SetVehicle(AActor* Vehicle)
@@ -108,7 +133,49 @@ void UCirrovaControlComponent::ApplyVehicle(const AActor* OldVehicle) const
 	RefreshInput();
 }
 
+void UCirrovaControlComponent::SetEnabled(bool bEnable)
+{
+	// 1) 本地玩家检查
+	if (!OwnerPlayerController.IsValid() || !OwnerPlayerController->IsLocalController()) return;
+
+	// 2) 幂等性检查，若状态未变更则直接返回
+	if (bIsEnable == bEnable) return;
+
+	// 3) 捕获旧状态后写入新状态
+	const bool bOldEnable = bIsEnable;
+	bIsEnable = bEnable;
+
+	// 4) 响应式编程：应用副作用
+	ApplyEnabled(bOldEnable);
+}
+
+void UCirrovaControlComponent::ApplyEnabled(bool bOldEnable) const
+{
+	RefreshInput();
+}
+
 // ReSharper disable CppMemberFunctionMayBeConst
+
+void UCirrovaControlComponent::HandleLookInputAction(const FInputActionValue& InputActionValue)
+{
+	// 1) 解析受控载具的相机臂
+	USpringArmComponent* CameraBoom = FindCameraBoom();
+	if (!IsValid(CameraBoom)) return;
+
+	// 2) 读取二维视角输入：X 为偏航、Y 为俯仰（灵敏度等缩放由 EnhancedInput 映射修饰器负责）
+	const FVector2D LookDelta = InputActionValue.Get<FVector2D>();
+
+	// 3) 仅写局部旋转：世界旋转由相机臂从载具继承，从而视角随载具俯仰/翻滚保持自由；
+	//    俯仰夹紧避免翻转，偏航不限制，滚转保持归零
+	const FRotator Current = CameraBoom->GetRelativeRotation();
+	CameraBoom->SetRelativeRotation(
+		FRotator(
+			FMath::Clamp(Current.Pitch + LookDelta.Y, PitchMin, PitchMax),
+			Current.Yaw + LookDelta.X,
+			0.0
+		)
+	);
+}
 
 void UCirrovaControlComponent::HandleSteering(const FInputActionValue& InputActionValue)
 {
@@ -182,6 +249,14 @@ void UCirrovaControlComponent::BindInput()
 	if (!IsValid(EnhancedInputComponent)) return;
 
 	// 4) 逐动作绑定回调
+	// Looking
+	EnhancedInputComponent->BindAction(
+		LookInputAction,
+		ETriggerEvent::Triggered,
+		this,
+		&UCirrovaControlComponent::HandleLookInputAction
+	);
+
 	// Steering
 	EnhancedInputComponent->BindAction(
 		SteeringInputAction,
@@ -246,8 +321,8 @@ void UCirrovaControlComponent::RefreshInput() const
 		ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(OwnerPlayerController->GetLocalPlayer());
 	if (!IsValid(Subsystem)) return;
 
-	// 4) 依据受控状态注册或移除映射上下文
-	if (ControlledVehicle.IsValid())
+	// 4) 依据开启与受控状态注册或移除映射上下文
+	if (bIsEnable && ControlledVehicle.IsValid())
 		Subsystem->AddMappingContext(InputMappingContext, InputPriority);
 	else
 		Subsystem->RemoveMappingContext(InputMappingContext);
@@ -259,4 +334,12 @@ USingularisMorphVehicleSimulationComponent* UCirrovaControlComponent::FindVehicl
 	if (!ControlledVehicle.IsValid()) return nullptr;
 
 	return ControlledVehicle->FindComponentByClass<USingularisMorphVehicleSimulationComponent>();
+}
+
+USpringArmComponent* UCirrovaControlComponent::FindCameraBoom() const
+{
+	if (!OwnerPlayerController.IsValid() || !OwnerPlayerController->IsLocalController()) return nullptr;
+	if (!ControlledVehicle.IsValid()) return nullptr;
+
+	return ControlledVehicle->FindComponentByClass<USpringArmComponent>();
 }
