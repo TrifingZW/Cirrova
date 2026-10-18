@@ -258,6 +258,7 @@ void UCirrovaControlComponent::HandleReverseStarted(const FInputActionValue& Inp
 
 	// 倒挡控制是布尔通道：按住期间物理线程的自动倒挡逻辑将目标挡位拉入倒挡
 	VehicleSimulation->SetInputBool(Chaos::ReverseControlName, true);
+	VehicleSimulation->SetInputAxis1D(Chaos::ThrottleControlName, InputActionValue.Get<float>());
 }
 
 void UCirrovaControlComponent::HandleReverseTriggered(const FInputActionValue& InputActionValue)
