@@ -4,6 +4,7 @@
 #include <InputActionValue.h>
 #include <Components/ActorComponent.h>
 
+#include "Interfaces/SingularisMorphVehicleControlInterface.h"
 #include "CirrovaControlComponent.generated.h"
 
 class UInputAction;
@@ -17,6 +18,7 @@ class USpringArmComponent;
  * 本地玩家控制设计模式典范：
  * 挂载于本地 PlayerController，经 EnhancedInput 绑定输入动作并将输入值直写
  * 受控载具的变型载具仿真组件；受控状态切换时同步增删输入映射上下文，全程本地生效、无复制。
+ * 同时实现 ISingularisMorphVehicleControlInterface，向 HUD 等观察者暴露当前受控载具。
  */
 UCLASS(
 	Blueprintable,
@@ -24,7 +26,8 @@ UCLASS(
 	ClassGroup = ("Cirrova"),
 	meta = (BlueprintSpawnableComponent, DisplayName = "虹涡控制组件")
 )
-class CIRROVA_API UCirrovaControlComponent : public UActorComponent
+class CIRROVA_API UCirrovaControlComponent : public UActorComponent,
+                                             public ISingularisMorphVehicleControlInterface
 {
 	GENERATED_BODY()
 
@@ -168,6 +171,13 @@ public:
 
 	/** 校验 Owner 为 PlayerController，缓存本地控制器并绑定输入动作 */
 	virtual void BeginPlay() override;
+
+#pragma endregion
+
+#pragma region ISingularisMorphVehicleControlInterface
+
+	/** 获取当前受控载具。 */
+	virtual AActor* GetControlledVehicle_Implementation() const override { return ControlledVehicle.Get(); }
 
 #pragma endregion
 

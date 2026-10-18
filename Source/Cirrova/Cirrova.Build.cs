@@ -6,6 +6,12 @@ public class Cirrova : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+		PublicDependencyModuleNames.AddRange(
+			[
+				"SingularisMorphVehicle"
+			]
+		);
+
 		PrivateDependencyModuleNames.AddRange(
 			[
 				"Core",
@@ -17,9 +23,7 @@ public class Cirrova : ModuleRules
 				"InputCore",
 				"EnhancedInput",
 
-				"GameplayTags",
-
-				"SingularisMorphVehicle"
+				"GameplayTags"
 			]
 		);
 	}
