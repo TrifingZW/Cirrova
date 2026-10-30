@@ -13,6 +13,12 @@
     "IsBetaVersion": true,
     "IsExperimentalVersion": true,
     "Installed": false,
+    "Plugins": [
+        {
+            "Name": "EnhancedInput",
+            "Enabled": true
+        }
+    ],
     "Modules": [
         {
             "Name": "Cirrova",
