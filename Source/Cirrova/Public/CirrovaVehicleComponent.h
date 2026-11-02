@@ -7,57 +7,35 @@
 #include "CirrovaVehicleComponent.generated.h"
 
 class UPrimitiveComponent;
+struct FCirrovaVehicleAsyncInput;
+struct FCirrovaVehicleOutput;
+struct FCirrovaVehicleRuntime;
 
-/** 单轮运行态：来自 liminal 编译产物的装配数据与本帧接触解。 */
-struct FCirrovaWheelRuntime
+/** 单轮游戏线程快照：由调度器在物理步进后写入。 */
+struct FCirrovaWheelState
 {
-	// 悬挂上挂点（底盘本地空间，UE 坐标 cm）。
-	FVector MountLocation = FVector::ZeroVector;
-
-	// 车轮旋转轴端口（读角速度、注入反作用力矩）。
-	uint64 ShaftPort = 0;
-
-	// 转向控制端口，0 表示不可转向。
-	uint64 SteeringPort = 0;
-
-	// 悬挂参数（SI）。
-	float SuspensionStiffness = 0.0f;
-	float SuspensionDamping = 0.0f;
-	float RestLength = 0.0f;
-	float MinLength = 0.0f;
+	// 悬挂行程上限（m）与车轮半径（m），装配后不变。
 	float MaxLength = 0.0f;
-
-	// 车轮半径（m）。
 	float Radius = 0.35f;
-
-	// 当前弹簧长度（m）。
-	float CurrentLength = 0.0f;
-
-	// 上一帧压缩量（m）。
-	float PreviousCompression = 0.0f;
-
-	// 首次求解标记：跳过一次压缩速度计算，避免出生时的阻尼冲击。
-	bool bSolved = false;
 
 	// 车轮角速度（rad/s）。
 	float Omega = 0.0f;
 
-	// 本帧接触解（世界坐标）。
+	// 当前弹簧长度（m）。
+	float SuspensionLength = 0.0f;
+
+	// 悬挂法向力（N）。
+	float SuspensionForce = 0.0f;
+
+	// 轮胎力解（SI）。
+	FLiminalTireForces TireForces{};
+
+	// 接触解（世界坐标）。
 	bool bInContact = false;
 	FVector ContactPoint = FVector::ZeroVector;
 	FVector ContactNormal = FVector::UpVector;
 	FVector LongitudinalAxis = FVector::ForwardVector;
 	FVector LateralAxis = FVector::RightVector;
-
-	// 接触点速度缓存（世界坐标，cm/s），供各子步复用。
-	FVector ContactVelocity = FVector::ZeroVector;
-
-	// 本帧各子步轮胎合力累计（世界坐标，N）。
-	FVector AccumulatedForce = FVector::ZeroVector;
-
-	// 本帧力解（SI，调试读出）。
-	float SuspensionForce = 0.0f;
-	FLiminalTireForces TireForces{};
 };
 
 #pragma region 委托签名
@@ -275,6 +253,15 @@ public:
 	)
 	float MaxBrakeTorque = 2000.0f;
 
+	// 使用 Chaos 原生悬挂约束；仅初始化时读取，运行时修改不生效。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|悬挂",
+		meta = (DisplayName = "原生悬挂约束")
+	)
+	bool bUseNativeSuspension = true;
+
 	// 轮胎峰值附着系数。
 	UPROPERTY(
 		EditAnywhere,
@@ -336,26 +323,17 @@ public:
 private:
 #pragma region State
 
-	// liminal 载具句柄。
-	FLiminalVehicleHandle VehicleHandle = nullptr;
-
 	// 底盘物理组件（拥有者根组件）。
 	TWeakObjectPtr<UPrimitiveComponent> ChassisPrimitive = nullptr;
 
-	// 车轮运行态。
-	TArray<FCirrovaWheelRuntime> Wheels;
+	// 游戏线程单轮快照。
+	TArray<FCirrovaWheelState> WheelStates;
 
-	// 驾驶舱信号端口。
-	uint64 ThrottleSignalPort = 0;
-	uint64 SteeringSignalPort = 0;
-	uint64 GearSignalPort = 0;
-	uint64 BrakeSignalPort = 0;
+	// 悬挂上挂点（底盘本地空间，cm），供调试绘制。
+	TArray<FVector> WheelMountLocations;
 
-	// 发动机轴端口（转速读出）。
-	uint64 EngineShaftPort = 0;
-
-	// 底盘质量（kg），初始化时缓存。
-	float ChassisMass = 0.0f;
+	// 发动机角速度（rad/s），由最近一次物理输出写入。
+	float EngineOmega = 0.0f;
 
 	// 驾驶输入缓存。
 	float ThrottleInput = 0.0f;
@@ -451,6 +429,19 @@ public:
 
 #pragma endregion
 
+#pragma region Scheduler Interface
+
+	// 由调度器在物理步进前调用：写入驾驶输入与底盘代理。
+	void ProduceAsyncInput(FCirrovaVehicleAsyncInput& Out) const;
+
+	// 由调度器在注册后调用：创建原生悬挂约束，失败时逐轮回退为力模式。
+	void InitializeSuspensionConstraints(FCirrovaVehicleRuntime& Runtime);
+
+	// 由调度器在物理步进后调用：刷新游戏线程快照并广播接地事件。
+	void ConsumeAsyncOutput(const FCirrovaVehicleOutput& In);
+
+#pragma endregion
+
 private:
 #pragma region RPC
 
@@ -467,29 +458,28 @@ private:
 #pragma region Internal Function
 
 	// 按默认布局构建 liminal 拓扑：驾驶舱、底盘、动力链与逐轮空间链。
-	void BuildTopology();
+	bool BuildTopology(FCirrovaVehicleRuntime& Runtime);
 
 	// 从编译产物读取空间装配：悬挂参数、转向控制端口与轮心静止位姿。
-	void ReadSpatialLinks(
+	bool ReadSpatialLinks(
+		FCirrovaVehicleRuntime& Runtime,
 		const TArray<uint64>& SuspensionNodes,
 		const TArray<uint64>& KnuckleNodes,
 		const TArray<uint64>& WheelNodes
 	);
 
-	// 求解单轮接触：射线、悬挂力、接触坐标系与接触点速度（帧内几何不变）。
-	void SolveContact(FCirrovaWheelRuntime& Wheel, float DeltaTime, float SteeringAngle);
-
-	// 求解单轮轮胎力并注入反作用力矩（按内部子步调用）。
-	void SolveTire(FCirrovaWheelRuntime& Wheel, float SubDeltaTime);
-
 	// 绘制单轮调试图元。
-	void DrawWheelDebug(const FCirrovaWheelRuntime& Wheel, const FVector& MountWorld, const FVector& ChassisUp) const;
+	void DrawWheelDebug(
+		const FCirrovaWheelState& WheelState,
+		const FVector& MountWorld,
+		const FVector& ChassisUp
+	) const;
 
 	// 读取节点端口句柄，失败返回 0。
-	uint64 PortOf(uint64 Node, uint32 Index) const;
+	uint64 PortOf(FLiminalVehicleHandle Handle, uint64 Node, uint32 Index) const;
 
 	// 建立端口连接，失败时记录日志。
-	bool Connect(uint64 SourcePort, uint64 TargetPort) const;
+	bool Connect(FLiminalVehicleHandle Handle, uint64 SourcePort, uint64 TargetPort) const;
 
 #pragma endregion
 };

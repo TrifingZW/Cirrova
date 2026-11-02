@@ -7,6 +7,9 @@ public class Cirrova : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+		// 物理后端依赖（Chaos / PhysicsCore）由 UBT 按目标平台补齐。
+		SetupModulePhysicsSupport(Target);
+
 		// CirrovaEngine 持有 liminal FFI 绑定头，
 		// 载具组件的公开头文件包含了 CirrovaLiminalApi.h，因此须为公共依赖。
 		PublicDependencyModuleNames.Add("CirrovaEngine");
@@ -37,6 +40,11 @@ public class Cirrova : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
+
+				// 物理线程回调、Chaos 粒子与物理对象查询接口。
+				"Chaos",
+				"PhysicsCore",
+				"ChaosSolverEngine",
 
 				"ChaosVehiclesCore",
 

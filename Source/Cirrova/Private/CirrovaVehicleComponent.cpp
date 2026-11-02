@@ -1,8 +1,18 @@
 #include "CirrovaVehicleComponent.h"
 
-#include "DrawDebugHelpers.h"
+#include "CirrovaSchedulerSubsystem.h"
+#include "CirrovaVehicleRuntime.h"
+#include "Chaos/ChaosScene.h"
+#include "Chaos/PBDSuspensionConstraintData.h"
 #include "Components/PrimitiveComponent.h"
+#include "DrawDebugHelpers.h"
 #include "Engine/World.h"
+#include "PBDRigidsSolver.h"
+#include "Physics/PhysicsInterfaceCore.h"
+#include "PhysicsEngine/BodyInstance.h"
+#include "PhysicsEngine/PhysicsObjectExternalInterface.h"
+// FPhysicsActorHandle 的具体类型，供到 IPhysicsProxyBase* 的派生到基类转换。
+#include "PhysicsProxy/SingleParticlePhysicsProxy.h"
 
 namespace
 {
@@ -27,17 +37,6 @@ namespace
 		);
 		return Result;
 	}
-
-	// 滑移归一化参考速度（m/s），低于该值按该值归一，避免低速除零。
-	constexpr float SlipReferenceSpeed = 1.0f;
-
-	// 帧内子步上限：轮胎力与轮速为显式耦合，子步长须低于数值刚度阈值，
-	// 否则轮速逐子步振荡放大（Jolt 以求解器内隐式约束消除该问题）。
-	constexpr float MaxSubstepDeltaTime = 0.0025f;
-	constexpr int32 MaxSubstepsPerTick = 32;
-
-	// 阻尼压缩速度钳制（m/s），等效减振器泄压阀，防止落地帧产生过大冲量。
-	constexpr float MaxCompressionVelocity = 2.0f;
 }
 
 UCirrovaVehicleComponent::UCirrovaVehicleComponent()
@@ -73,7 +72,7 @@ void UCirrovaVehicleComponent::BeginPlay()
 	}
 
 	// 默认参数适用于约 1 吨级底盘；质量失配会放大悬挂力与落地冲量。
-	ChassisMass = ChassisPrimitive->GetMass();
+	const float ChassisMass = ChassisPrimitive->GetMass();
 	UE_LOG(
 		LogTemp,
 		Log,
@@ -91,16 +90,49 @@ void UCirrovaVehicleComponent::BeginPlay()
 		);
 	}
 
-	BuildTopology();
+	UCirrovaSchedulerSubsystem* Scheduler = GetWorld()
+		                                          ? GetWorld()->GetSubsystem<UCirrovaSchedulerSubsystem>()
+		                                          : nullptr;
+	if (!Scheduler)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Cirrova 载具组件：未找到调度器子系统，组件已停用。"));
+		SetComponentTickEnabled(false);
+		return;
+	}
+
+	TUniquePtr<FCirrovaVehicleRuntime> Runtime = MakeUnique<FCirrovaVehicleRuntime>();
+	if (!BuildTopology(*Runtime))
+	{
+		SetComponentTickEnabled(false);
+		return;
+	}
+
+	WheelStates.SetNum(Runtime->Wheels.Num());
+	WheelMountLocations.SetNum(Runtime->Wheels.Num());
+	for (int32 Index = 0; Index < Runtime->Wheels.Num(); ++Index)
+	{
+		const FCirrovaWheelRuntime& Wheel = Runtime->Wheels[Index];
+		WheelStates[Index].MaxLength = Wheel.MaxLength;
+		WheelStates[Index].Radius = Wheel.Radius;
+		WheelMountLocations[Index] = Wheel.MountLocation;
+	}
+
+	if (!Scheduler->RegisterVehicle(this, MoveTemp(Runtime)))
+	{
+		UE_LOG(LogTemp, Error, TEXT("Cirrova 载具组件：注册到调度器失败，组件已停用。"));
+		SetComponentTickEnabled(false);
+	}
 }
 
 void UCirrovaVehicleComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	if (VehicleHandle)
+	if (UCirrovaSchedulerSubsystem* Scheduler = GetWorld()
+		                                              ? GetWorld()->GetSubsystem<UCirrovaSchedulerSubsystem>()
+		                                              : nullptr)
 	{
-		liminal_vehicle_free(VehicleHandle);
-		VehicleHandle = nullptr;
+		Scheduler->UnregisterVehicle(this);
 	}
+
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -112,55 +144,16 @@ void UCirrovaVehicleComponent::TickComponent(
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	if (!VehicleHandle || !ChassisPrimitive.IsValid() || Wheels.Num() == 0) { return; }
-	if (DeltaTime <= KINDA_SMALL_NUMBER) { return; }
+	if (!bDrawDebug || !ChassisPrimitive.IsValid()) { return; }
 
-	// 1) 驾驶信号：转向写入目标角（弧度），其余为归一化标量。
-	const float SteeringAngle =
-		FMath::Clamp(SteeringInput, -1.0f, 1.0f) * FMath::DegreesToRadians(MaxSteeringAngle);
-	liminal_vehicle_write_signal(VehicleHandle, ThrottleSignalPort, FMath::Clamp(ThrottleInput, 0.0f, 1.0f));
-	liminal_vehicle_write_signal(VehicleHandle, SteeringSignalPort, SteeringAngle);
-	liminal_vehicle_write_signal(VehicleHandle, GearSignalPort, static_cast<float>(GearInput));
-	liminal_vehicle_write_signal(VehicleHandle, BrakeSignalPort, FMath::Clamp(BrakeInput, 0.0f, 1.0f));
-
-	// 2) 逐轮接触解（帧内几何不变）：射线、接触坐标系、悬挂力与接触点速度。
-	for (FCirrovaWheelRuntime& Wheel : Wheels) { SolveContact(Wheel, DeltaTime, SteeringAngle); }
-
-	// 3) 帧内子步：轮胎力与 1D 动力流按子步耦合，
-	//    将帧级刚度换算为子步刚度，消除轮速与轮胎力显式耦合的数值发散。
-	for (FCirrovaWheelRuntime& Wheel : Wheels) { Wheel.AccumulatedForce = FVector::ZeroVector; }
-	const int32 Substeps = FMath::Clamp(
-		FMath::CeilToInt(DeltaTime / MaxSubstepDeltaTime),
-		1,
-		MaxSubstepsPerTick
-	);
-	const float SubDeltaTime = DeltaTime / static_cast<float>(Substeps);
-	for (int32 Step = 0; Step < Substeps; ++Step)
+	const FTransform ChassisToWorld = ChassisPrimitive->GetComponentTransform();
+	const FVector ChassisUp = ChassisToWorld.GetUnitAxis(EAxis::Z);
+	for (int32 Index = 0; Index < WheelStates.Num(); ++Index)
 	{
-		for (FCirrovaWheelRuntime& Wheel : Wheels) { SolveTire(Wheel, SubDeltaTime); }
-		liminal_vehicle_step(VehicleHandle, SubDeltaTime);
-		for (FCirrovaWheelRuntime& Wheel : Wheels)
-		{
-			liminal_vehicle_read_omega(VehicleHandle, Wheel.ShaftPort, &Wheel.Omega);
-		}
-	}
-
-	// 4) 施加帧平均合力（N → kg·cm/s²）并汇总接地状态。
-	UPrimitiveComponent* Chassis = ChassisPrimitive.Get();
-	bool bGrounded = false;
-	for (FCirrovaWheelRuntime& Wheel : Wheels)
-	{
-		bGrounded |= Wheel.bInContact;
-		if (Wheel.bInContact)
-		{
-			const FVector Force = Wheel.AccumulatedForce * (100.0f / static_cast<float>(Substeps));
-			if (!Force.IsNearlyZero()) { Chassis->AddForceAtLocation(Force, Wheel.ContactPoint); }
-		}
-	}
-	if (bGrounded != bWasGrounded)
-	{
-		bWasGrounded = bGrounded;
-		OnVehicleGroundedEvent.Broadcast(bGrounded);
+		const FVector MountWorld = WheelMountLocations.IsValidIndex(Index)
+			                           ? ChassisToWorld.TransformPosition(WheelMountLocations[Index])
+			                           : ChassisToWorld.GetLocation();
+		DrawWheelDebug(WheelStates[Index], MountWorld, ChassisUp);
 	}
 }
 
@@ -174,35 +167,216 @@ void UCirrovaVehicleComponent::SetGear(int32 Gear) { GearInput = Gear; }
 
 float UCirrovaVehicleComponent::GetEngineRPM() const
 {
-	if (!VehicleHandle || EngineShaftPort == 0) { return 0.0f; }
-	float Omega = 0.0f;
-	if (liminal_vehicle_read_omega(VehicleHandle, EngineShaftPort, &Omega) != ELiminalStatus::Ok) { return 0.0f; }
-	return Omega * 60.0f / static_cast<float>(2.0 * PI);
+	return EngineOmega * 60.0f / static_cast<float>(2.0 * PI);
 }
 
 float UCirrovaVehicleComponent::GetWheelAngularVelocity(int32 WheelIndex) const
 {
-	return Wheels.IsValidIndex(WheelIndex) ? Wheels[WheelIndex].Omega : 0.0f;
+	return WheelStates.IsValidIndex(WheelIndex) ? WheelStates[WheelIndex].Omega : 0.0f;
 }
 
 bool UCirrovaVehicleComponent::IsGrounded() const { return bWasGrounded; }
 
-void UCirrovaVehicleComponent::BuildTopology()
+void UCirrovaVehicleComponent::ProduceAsyncInput(FCirrovaVehicleAsyncInput& Out) const
 {
-	VehicleHandle = liminal_vehicle_new();
-	if (!VehicleHandle)
+	Out.Throttle = ThrottleInput;
+	Out.Steering = SteeringInput;
+	Out.Brake = BrakeInput;
+	Out.Gear = GearInput;
+
+	const UPrimitiveComponent* Chassis = ChassisPrimitive.Get();
+	if (!Chassis) { return; }
+
+	if (const FBodyInstance* BodyInstance = Chassis->GetBodyInstance())
 	{
-		SetComponentTickEnabled(false);
+		Out.Proxy = BodyInstance->GetPhysicsActor();
+	}
+	Out.TraceParams = FCollisionQueryParams(
+		SCENE_QUERY_STAT(CirrovaWheelTrace),
+		false,
+		GetOwner()
+	);
+	// 只需宽相候选集：窄相射线在物理线程对候选对象执行。
+	Out.TraceParams.bIgnoreTouches = true;
+	Out.TraceParams.bSkipNarrowPhase = true;
+	Out.TraceParams.bTraceComplex = true;
+}
+
+void UCirrovaVehicleComponent::InitializeSuspensionConstraints(FCirrovaVehicleRuntime& Runtime)
+{
+	if (!bUseNativeSuspension || !ChassisPrimitive.IsValid()) { return; }
+
+	const FBodyInstance* BodyInstance = ChassisPrimitive->GetBodyInstance();
+	IPhysicsProxyBase* Proxy = BodyInstance ? BodyInstance->GetPhysicsActor() : nullptr;
+	if (!Proxy || Proxy->GetType() != EPhysicsProxyType::SingleParticleProxy)
+	{
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("Cirrova 载具组件：底盘不是单粒子物理代理，悬挂回退为力模式。")
+		);
 		return;
+	}
+
+	auto* ParticleProxy = static_cast<Chaos::FSingleParticlePhysicsProxy*>(Proxy);
+	Chaos::FPhysicsObjectHandle PhysicsObject = ParticleProxy->GetPhysicsObject();
+	Chaos::FPhysicsSolver* Solver = Proxy->GetSolver<Chaos::FPhysicsSolver>();
+	if (!PhysicsObject || !Solver)
+	{
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("Cirrova 载具组件：物理对象或求解器不可用，悬挂回退为力模式。")
+		);
+		return;
+	}
+
+	// 约束阻尼项以步长为量纲：D = SpringDamping·dt，按求解器步长换算。
+	float SolverDeltaTime = static_cast<float>(Solver->GetAsyncDeltaTime());
+	if (SolverDeltaTime <= KINDA_SMALL_NUMBER) { SolverDeltaTime = 1.0f / 60.0f; }
+	SolverDeltaTime = FMath::Clamp(SolverDeltaTime, 1.0f / 1000.0f, 0.1f);
+
+	FChaosScene* Scene = FPhysicsObjectExternalInterface::GetScene(PhysicsObject);
+	if (!Scene)
+	{
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("Cirrova 载具组件：无法获取物理场景，悬挂回退为力模式。")
+		);
+		return;
+	}
+
+	FLockedWritePhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockWrite(Scene);
+	if (!Interface->GetParticle(PhysicsObject))
+	{
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("Cirrova 载具组件：物理对象未就绪，悬挂回退为力模式。")
+		);
+		return;
+	}
+
+	int32 NativeCount = 0;
+	for (int32 Index = 0; Index < Runtime.Wheels.Num(); ++Index)
+	{
+		FCirrovaWheelRuntime& Wheel = Runtime.Wheels[Index];
+		if (Wheel.RestLength <= Wheel.MinLength)
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("Cirrova 载具组件：车轮 %d 的自由长度不大于行程下限，悬挂回退为力模式。"),
+				Index
+			);
+			continue;
+		}
+
+		const FPhysicsConstraintHandle Handle = FPhysicsInterface::CreateSuspension(
+			PhysicsObject,
+			Wheel.MountLocation
+		);
+		if (!Handle.IsValid())
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("Cirrova 载具组件：车轮 %d 悬挂约束创建失败，回退为力模式。"),
+				Index
+			);
+			continue;
+		}
+
+		// 句柄无论约束对象是否可用都留存，由注销路径统一释放。
+		Wheel.SuspensionConstraintHandle = Handle;
+		auto* Constraint = static_cast<Chaos::FSuspensionConstraint*>(Handle.Constraint);
+		if (!Constraint)
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("Cirrova 载具组件：车轮 %d 悬挂约束类型无效，回退为力模式。"),
+				Index
+			);
+			continue;
+		}
+
+		Constraint->SetHardstopStiffness(1.0f);
+		Constraint->SetHardstopVelocityCompensation(1.0f);
+		Constraint->SetSpringPreload(0.0f);
+		Constraint->SetSpringStiffness(FMath::Max(Wheel.SuspensionStiffness, 0.0f));
+		Constraint->SetSpringDamping(
+			FMath::Max(Wheel.SuspensionDamping, 0.0f) * SolverDeltaTime
+		);
+		Constraint->SetMinLength(Wheel.MinLength * 100.0f);
+		Constraint->SetMaxLength(Wheel.RestLength * 100.0f);
+		Constraint->SetAxis(Chaos::FVec3(0.0f, 0.0f, 1.0f));
+		// 保持 Enabled=false：目标点与法向在首个物理步由 SetSuspensionTarget 写入。
+
+		Wheel.SuspensionConstraint = Constraint;
+		Wheel.bUseSuspensionConstraint = true;
+		++NativeCount;
+	}
+
+	UE_LOG(
+		LogTemp,
+		Log,
+		TEXT("Cirrova 载具组件：原生悬挂约束启用 %d/%d 轮。"),
+		NativeCount,
+		Runtime.Wheels.Num()
+	);
+}
+
+void UCirrovaVehicleComponent::ConsumeAsyncOutput(const FCirrovaVehicleOutput& In)
+{
+	EngineOmega = In.EngineOmega;
+	if (WheelStates.Num() != In.Wheels.Num()) { WheelStates.SetNum(In.Wheels.Num()); }
+
+	for (int32 Index = 0; Index < In.Wheels.Num(); ++Index)
+	{
+		const FCirrovaWheelOutput& Source = In.Wheels[Index];
+		FCirrovaWheelState& Target = WheelStates[Index];
+		Target.bInContact = Source.bInContact;
+		Target.Omega = Source.Omega;
+		Target.SuspensionLength = Source.SuspensionLength;
+		Target.SuspensionForce = Source.SuspensionForce;
+		Target.TireForces = Source.TireForces;
+		Target.ContactPoint = Source.ContactPoint;
+		Target.ContactNormal = Source.ContactNormal;
+		Target.LongitudinalAxis = Source.LongitudinalAxis;
+		Target.LateralAxis = Source.LateralAxis;
+	}
+
+	if (In.bGrounded != bWasGrounded)
+	{
+		bWasGrounded = In.bGrounded;
+		OnVehicleGroundedEvent.Broadcast(bWasGrounded);
+	}
+}
+
+bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
+{
+	Runtime.Handle = liminal_vehicle_new();
+	if (!Runtime.Handle)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Cirrova 载具组件：liminal 句柄创建失败。"));
+		return false;
 	}
 
 	const int32 WheelCount = WheelConfigs.Num();
 	if (WheelCount == 0 || GearRatios.Num() == 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Cirrova 载具组件缺少车轮配置或传动比，组件已停用。"));
-		SetComponentTickEnabled(false);
-		return;
+		return false;
 	}
+
+	Runtime.ChassisMass = ChassisPrimitive.IsValid() ? ChassisPrimitive->GetMass() : 0.0f;
+	Runtime.MaxSteeringAngle = FMath::DegreesToRadians(MaxSteeringAngle);
+	Runtime.TireFriction = TireFriction;
+	Runtime.TireLateralStiffness = TireLateralStiffness;
+	Runtime.WheelInertia = WheelInertia;
+	Runtime.WheelTraceChannel = WheelTraceChannel.GetValue();
 
 	uint64 Cockpit = 0;
 	uint64 Chassis = 0;
@@ -212,7 +386,7 @@ void UCirrovaVehicleComponent::BuildTopology()
 	uint64 SteeringSplitter = 0;
 	uint64 BrakeSplitter = 0;
 
-	liminal_vehicle_add_cockpit(VehicleHandle, &Cockpit);
+	liminal_vehicle_add_cockpit(Runtime.Handle, &Cockpit);
 
 	// 挂点：UE cm → liminal m 并做基变换。
 	TArray<FLiminalFrame> Mounts;
@@ -231,17 +405,17 @@ void UCirrovaVehicleComponent::BuildTopology()
 		Mount.Rotation[2] = 0.0f;
 		Mount.Rotation[3] = 1.0f;
 	}
-	liminal_vehicle_add_chassis(VehicleHandle, Mounts.GetData(), Mounts.Num(), &Chassis);
+	liminal_vehicle_add_chassis(Runtime.Handle, Mounts.GetData(), Mounts.Num(), &Chassis);
 
 	liminal_vehicle_add_engine(
-		VehicleHandle,
+		Runtime.Handle,
 		EngineMaxTorque,
 		EngineMaxAngularVelocity,
 		EngineInertia,
 		&Engine
 	);
 	liminal_vehicle_add_gearbox(
-		VehicleHandle,
+		Runtime.Handle,
 		GearRatios.GetData(),
 		static_cast<size_t>(GearRatios.Num()),
 		GearboxInertia,
@@ -250,7 +424,7 @@ void UCirrovaVehicleComponent::BuildTopology()
 	if (bUseDifferential)
 	{
 		liminal_vehicle_add_differential(
-			VehicleHandle,
+			Runtime.Handle,
 			static_cast<size_t>(WheelCount),
 			DifferentialCoupling,
 			DifferentialMaxTorque,
@@ -261,29 +435,29 @@ void UCirrovaVehicleComponent::BuildTopology()
 	else
 	{
 		liminal_vehicle_add_axle(
-			VehicleHandle,
+			Runtime.Handle,
 			static_cast<size_t>(WheelCount),
 			AxleInertia,
 			&Distributor
 		);
 	}
-	liminal_vehicle_add_splitter(VehicleHandle, static_cast<size_t>(WheelCount), &SteeringSplitter);
-	liminal_vehicle_add_splitter(VehicleHandle, static_cast<size_t>(WheelCount), &BrakeSplitter);
+	liminal_vehicle_add_splitter(Runtime.Handle, static_cast<size_t>(WheelCount), &SteeringSplitter);
+	liminal_vehicle_add_splitter(Runtime.Handle, static_cast<size_t>(WheelCount), &BrakeSplitter);
 
 	// 驾驶舱信号：油门/挡位直达，转向与制动经分发器到各轮。
-	ThrottleSignalPort = PortOf(Cockpit, 0);
-	SteeringSignalPort = PortOf(Cockpit, 1);
-	GearSignalPort = PortOf(Cockpit, 2);
-	BrakeSignalPort = PortOf(Cockpit, 3);
-	EngineShaftPort = PortOf(Engine, 1);
-	Connect(ThrottleSignalPort, PortOf(Engine, 0));
-	Connect(GearSignalPort, PortOf(Gearbox, 0));
-	Connect(SteeringSignalPort, PortOf(SteeringSplitter, 0));
-	Connect(BrakeSignalPort, PortOf(BrakeSplitter, 0));
+	Runtime.ThrottleSignalPort = PortOf(Runtime.Handle, Cockpit, 0);
+	Runtime.SteeringSignalPort = PortOf(Runtime.Handle, Cockpit, 1);
+	Runtime.GearSignalPort = PortOf(Runtime.Handle, Cockpit, 2);
+	Runtime.BrakeSignalPort = PortOf(Runtime.Handle, Cockpit, 3);
+	Runtime.EngineShaftPort = PortOf(Runtime.Handle, Engine, 1);
+	Connect(Runtime.Handle, Runtime.ThrottleSignalPort, PortOf(Runtime.Handle, Engine, 0));
+	Connect(Runtime.Handle, Runtime.GearSignalPort, PortOf(Runtime.Handle, Gearbox, 0));
+	Connect(Runtime.Handle, Runtime.SteeringSignalPort, PortOf(Runtime.Handle, SteeringSplitter, 0));
+	Connect(Runtime.Handle, Runtime.BrakeSignalPort, PortOf(Runtime.Handle, BrakeSplitter, 0));
 
 	// 动力链：发动机 → 变速箱 → 轮轴/差速器。
-	Connect(PortOf(Engine, 1), PortOf(Gearbox, 1));
-	Connect(PortOf(Gearbox, 2), PortOf(Distributor, 0));
+	Connect(Runtime.Handle, PortOf(Runtime.Handle, Engine, 1), PortOf(Runtime.Handle, Gearbox, 1));
+	Connect(Runtime.Handle, PortOf(Runtime.Handle, Gearbox, 2), PortOf(Runtime.Handle, Distributor, 0));
 
 	// 逐轮：空间链（底盘 → 悬挂 → 转向节 → 车轮）、动力与制动、信号分发。
 	TArray<uint64> SuspensionNodes;
@@ -301,7 +475,7 @@ void UCirrovaVehicleComponent::BuildTopology()
 		uint64 Knuckle = 0;
 		uint64 Wheel = 0;
 		liminal_vehicle_add_suspension(
-			VehicleHandle,
+			Runtime.Handle,
 			Config.SuspensionStiffness,
 			Config.SuspensionDamping,
 			Config.SuspensionRestLength,
@@ -309,61 +483,87 @@ void UCirrovaVehicleComponent::BuildTopology()
 			Config.SuspensionMaxLength,
 			&Suspension
 		);
-		liminal_vehicle_add_knuckle(VehicleHandle, MaxBrakeTorque, &Knuckle);
+		liminal_vehicle_add_knuckle(Runtime.Handle, MaxBrakeTorque, &Knuckle);
 		liminal_vehicle_add_wheel(
-			VehicleHandle,
+			Runtime.Handle,
 			WheelInertia,
 			WheelFrictionTorque,
 			Config.Radius * 0.01f,
 			&Wheel
 		);
 
-		Connect(PortOf(Chassis, Index), PortOf(Suspension, 0));
-		Connect(PortOf(Suspension, 1), PortOf(Knuckle, 0));
-		Connect(PortOf(Knuckle, 1), PortOf(Wheel, 1));
+		Connect(Runtime.Handle, PortOf(Runtime.Handle, Chassis, Index), PortOf(Runtime.Handle, Suspension, 0));
+		Connect(Runtime.Handle, PortOf(Runtime.Handle, Suspension, 1), PortOf(Runtime.Handle, Knuckle, 0));
+		Connect(Runtime.Handle, PortOf(Runtime.Handle, Knuckle, 1), PortOf(Runtime.Handle, Wheel, 1));
 
-		Connect(PortOf(Distributor, static_cast<uint32>(Index) + 1), PortOf(Wheel, 0));
-		Connect(PortOf(Knuckle, 4), PortOf(Wheel, 0));
+		Connect(
+			Runtime.Handle,
+			PortOf(Runtime.Handle, Distributor, static_cast<uint32>(Index) + 1),
+			PortOf(Runtime.Handle, Wheel, 0)
+		);
+		Connect(Runtime.Handle, PortOf(Runtime.Handle, Knuckle, 4), PortOf(Runtime.Handle, Wheel, 0));
 
 		// 不可转向的车轮不接转向信号，端口保持零值。
 		if (Config.bSteerable)
 		{
-			Connect(PortOf(SteeringSplitter, static_cast<uint32>(Index) + 1), PortOf(Knuckle, 2));
+			Connect(
+				Runtime.Handle,
+				PortOf(Runtime.Handle, SteeringSplitter, static_cast<uint32>(Index) + 1),
+				PortOf(Runtime.Handle, Knuckle, 2)
+			);
 		}
-		Connect(PortOf(BrakeSplitter, static_cast<uint32>(Index) + 1), PortOf(Knuckle, 3));
+		Connect(
+			Runtime.Handle,
+			PortOf(Runtime.Handle, BrakeSplitter, static_cast<uint32>(Index) + 1),
+			PortOf(Runtime.Handle, Knuckle, 3)
+		);
 
 		SuspensionNodes.Add(Suspension);
 		KnuckleNodes.Add(Knuckle);
 		WheelNodes.Add(Wheel);
 	}
 
-	liminal_vehicle_recompile(VehicleHandle);
-	ReadSpatialLinks(SuspensionNodes, KnuckleNodes, WheelNodes);
+	if (liminal_vehicle_recompile(Runtime.Handle) != ELiminalStatus::Ok)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Cirrova 载具组件：liminal 拓扑编译失败。"));
+		return false;
+	}
+	if (!ReadSpatialLinks(Runtime, SuspensionNodes, KnuckleNodes, WheelNodes)
+		|| Runtime.Wheels.Num() != WheelCount)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Cirrova 载具组件：空间装配读取失败。"));
+		return false;
+	}
+	return true;
 }
 
-void UCirrovaVehicleComponent::ReadSpatialLinks(
+bool UCirrovaVehicleComponent::ReadSpatialLinks(
+	FCirrovaVehicleRuntime& Runtime,
 	const TArray<uint64>& SuspensionNodes,
 	const TArray<uint64>& KnuckleNodes,
 	const TArray<uint64>& WheelNodes
 )
 {
-	Wheels.SetNum(WheelNodes.Num());
+	Runtime.Wheels.SetNum(WheelNodes.Num());
 	TArray<FTransform> RestPoses;
 	RestPoses.Init(FTransform::Identity, WheelNodes.Num());
 
 	size_t LinkCount = 0;
-	if (liminal_vehicle_spatial_link_count(VehicleHandle, &LinkCount) != ELiminalStatus::Ok) { return; }
+	if (liminal_vehicle_spatial_link_count(Runtime.Handle, &LinkCount) != ELiminalStatus::Ok)
+	{
+		return false;
+	}
 
 	for (size_t Index = 0; Index < LinkCount; ++Index)
 	{
 		FLiminalSpatialLink Link;
-		if (liminal_vehicle_spatial_link(VehicleHandle, Index, &Link) != ELiminalStatus::Ok) { continue; }
+		if (liminal_vehicle_spatial_link(Runtime.Handle, Index, &Link) != ELiminalStatus::Ok) { continue; }
 
 		// 悬挂链接（子 = 悬挂节点）：弹簧参数。
 		int32 WheelIndex = SuspensionNodes.IndexOfByKey(Link.Child);
 		if (WheelIndex != INDEX_NONE)
 		{
-			FCirrovaWheelRuntime& Wheel = Wheels[WheelIndex];
+			FCirrovaWheelRuntime& Wheel = Runtime.Wheels[WheelIndex];
 			Wheel.SuspensionStiffness = Link.Joint.Stiffness;
 			Wheel.SuspensionDamping = Link.Joint.Damping;
 			Wheel.RestLength = Link.Joint.RestLength;
@@ -376,7 +576,7 @@ void UCirrovaVehicleComponent::ReadSpatialLinks(
 		WheelIndex = KnuckleNodes.IndexOfByKey(Link.Child);
 		if (WheelIndex != INDEX_NONE)
 		{
-			Wheels[WheelIndex].SteeringPort = Link.HasControl ? Link.ControlPort : 0;
+			Runtime.Wheels[WheelIndex].SteeringPort = Link.HasControl ? Link.ControlPort : 0;
 			continue;
 		}
 
@@ -388,153 +588,21 @@ void UCirrovaVehicleComponent::ReadSpatialLinks(
 	// 由轮心静止位姿与自由长度反推悬挂上挂点（沿静止位形的上方向）。
 	for (int32 Index = 0; Index < WheelNodes.Num(); ++Index)
 	{
-		FCirrovaWheelRuntime& Wheel = Wheels[Index];
-		Wheel.ShaftPort = PortOf(WheelNodes[Index], 0);
+		FCirrovaWheelRuntime& Wheel = Runtime.Wheels[Index];
+		Wheel.ShaftPort = PortOf(Runtime.Handle, WheelNodes[Index], 0);
 		Wheel.Radius = WheelConfigs[Index].Radius * 0.01f;
+		Wheel.bSteerable = WheelConfigs[Index].bSteerable;
 		Wheel.CurrentLength = Wheel.RestLength;
 
 		const FTransform& RestPose = RestPoses[Index];
 		Wheel.MountLocation =
 			RestPose.GetTranslation() + RestPose.GetUnitAxis(EAxis::Z) * (Wheel.RestLength * 100.0f);
 	}
-}
-
-void UCirrovaVehicleComponent::SolveContact(
-	FCirrovaWheelRuntime& Wheel,
-	float DeltaTime,
-	float SteeringAngle
-)
-{
-	UPrimitiveComponent* Chassis = ChassisPrimitive.Get();
-	const FTransform ChassisToWorld = Chassis->GetComponentTransform();
-	const FVector ChassisUp = ChassisToWorld.GetUnitAxis(EAxis::Z);
-	const FVector MountWorld = ChassisToWorld.TransformPosition(Wheel.MountLocation);
-
-	// 射线：挂点沿底盘向下，长度 = 行程上限 + 车轮半径。
-	const float TraceLength = (Wheel.MaxLength + Wheel.Radius) * 100.0f;
-	const FVector TraceEnd = MountWorld - ChassisUp * TraceLength;
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(CirrovaWheelTrace), false, GetOwner());
-	FHitResult Hit;
-	Wheel.bInContact = GetWorld()->LineTraceSingleByChannel(
-		Hit,
-		MountWorld,
-		TraceEnd,
-		WheelTraceChannel.GetValue(),
-		Params
-	);
-
-	// 弹簧长度（m）：命中则按命中距离扣除半径，钳制在行程内。
-	Wheel.CurrentLength = Wheel.MaxLength;
-	if (Wheel.bInContact)
-	{
-		Wheel.CurrentLength = FMath::Clamp(
-			Hit.Distance * 0.01f - Wheel.Radius,
-			Wheel.MinLength,
-			Wheel.MaxLength
-		);
-	}
-
-	Wheel.ContactPoint = Wheel.bInContact ? Hit.ImpactPoint : TraceEnd;
-	Wheel.ContactNormal = Wheel.bInContact ? Hit.ImpactNormal : ChassisUp;
-
-	// 压缩量与压缩速度（SI），悬挂法向力只推不拉。
-	// 首次求解跳过速度计算，避免出生位形的阶跃；
-	// 速度钳制等效减振器泄压阀，消除落地帧的冲量尖峰。
-	const float Compression = Wheel.RestLength - Wheel.CurrentLength;
-	float CompressionVelocity = 0.0f;
-	if (Wheel.bSolved)
-	{
-		CompressionVelocity = FMath::Clamp(
-			(Compression - Wheel.PreviousCompression) / DeltaTime,
-			-MaxCompressionVelocity,
-			MaxCompressionVelocity
-		);
-	}
-	Wheel.PreviousCompression = Compression;
-	Wheel.bSolved = true;
-	Wheel.SuspensionForce = Wheel.bInContact
-		                        ? liminal_suspension_force(
-			                        Wheel.SuspensionStiffness,
-			                        Wheel.SuspensionDamping,
-			                        Compression,
-			                        CompressionVelocity
-		                        )
-		                        : 0.0f;
-
-	// 接触坐标系：纵向 = 轮前向（含转向角）在接触平面上的投影，侧向 = 法线 × 纵向。
-	const FQuat SteeringRotation(ChassisUp, SteeringAngle);
-	FVector Forward = SteeringRotation.RotateVector(ChassisToWorld.GetUnitAxis(EAxis::X));
-	Forward = (Forward - Wheel.ContactNormal * FVector::DotProduct(Forward, Wheel.ContactNormal))
-		.GetSafeNormal();
-	Wheel.LongitudinalAxis = Forward;
-	Wheel.LateralAxis = FVector::CrossProduct(Wheel.ContactNormal, Forward).GetSafeNormal();
-
-	// 接触点速度（cm/s），帧内缓存供各子步复用；地面假设为静态碰撞体。
-	const FVector Linear = Chassis->GetPhysicsLinearVelocity();
-	const FVector Angular = Chassis->GetPhysicsAngularVelocityInRadians();
-	const FVector CenterOfMass = Chassis->GetCenterOfMass();
-	Wheel.ContactVelocity =
-		Linear + FVector::CrossProduct(Angular, Wheel.ContactPoint - CenterOfMass);
-
-	if (bDrawDebug) { DrawWheelDebug(Wheel, MountWorld, ChassisUp); }
-}
-
-void UCirrovaVehicleComponent::SolveTire(FCirrovaWheelRuntime& Wheel, float SubDeltaTime)
-{
-	Wheel.TireForces = FLiminalTireForces{0.0f, 0.0f};
-	if (!Wheel.bInContact || Wheel.SuspensionForce <= 0.0f) { return; }
-
-	// 接触点相对地面的速度（m/s），地面假设为静态碰撞体。
-	const float LongitudinalSpeed =
-		FVector::DotProduct(Wheel.ContactVelocity, Wheel.LongitudinalAxis) * 0.01f;
-	const float LateralSpeed =
-		FVector::DotProduct(Wheel.ContactVelocity, Wheel.LateralAxis) * 0.01f;
-
-	const float SlipAngle = FMath::Atan2(
-		LateralSpeed,
-		FMath::Max(FMath::Abs(LongitudinalSpeed), SlipReferenceSpeed)
-	);
-
-	// 冲量模式：纵向按本子步内对齐轮面与地面速度的冲量折算，侧向按侧偏刚度。
-	Wheel.TireForces = liminal_tire_impulse_forces(
-		TireFriction,
-		TireLateralStiffness,
-		Wheel.Omega,
-		LongitudinalSpeed,
-		Wheel.Radius,
-		WheelInertia,
-		SlipAngle,
-		Wheel.SuspensionForce,
-		SubDeltaTime
-	);
-
-	// 阻力侧零过冲：单轮阻力不得超过本步内使整车相对速度归零的分担量，
-	// 防止静止/低速时轮胎力把车身反向推挤。
-	const float StopForceShare = ChassisMass * FMath::Abs(LongitudinalSpeed)
-		/ (FMath::Max(SubDeltaTime, KINDA_SMALL_NUMBER)
-			* static_cast<float>(FMath::Max(Wheels.Num(), 1)));
-	if (Wheel.TireForces.Longitudinal * LongitudinalSpeed < 0.0f
-		&& FMath::Abs(Wheel.TireForces.Longitudinal) > StopForceShare)
-	{
-		Wheel.TireForces.Longitudinal =
-			FMath::Sign(Wheel.TireForces.Longitudinal) * StopForceShare;
-	}
-
-	// 本子步合力累计（N），帧末取平均后施加。
-	Wheel.AccumulatedForce += Wheel.ContactNormal * Wheel.SuspensionForce
-		+ Wheel.LongitudinalAxis * Wheel.TireForces.Longitudinal
-		+ Wheel.LateralAxis * Wheel.TireForces.Lateral;
-
-	// 轮胎纵向力对车轮的反作用力矩回注 1D 域（N·m），由下一次子步消费。
-	liminal_vehicle_write_torque(
-		VehicleHandle,
-		Wheel.ShaftPort,
-		-Wheel.TireForces.Longitudinal * Wheel.Radius
-	);
+	return true;
 }
 
 void UCirrovaVehicleComponent::DrawWheelDebug(
-	const FCirrovaWheelRuntime& Wheel,
+	const FCirrovaWheelState& WheelState,
 	const FVector& MountWorld,
 	const FVector& ChassisUp
 ) const
@@ -542,38 +610,38 @@ void UCirrovaVehicleComponent::DrawWheelDebug(
 	UWorld* World = GetWorld();
 	if (!World) { return; }
 
-	const float TraceLength = (Wheel.MaxLength + Wheel.Radius) * 100.0f;
+	const float TraceLength = (WheelState.MaxLength + WheelState.Radius) * 100.0f;
 	const FVector TraceEnd = MountWorld - ChassisUp * TraceLength;
 	DrawDebugLine(
 		World,
 		MountWorld,
 		TraceEnd,
-		Wheel.bInContact ? FColor::Green : FColor::Red,
+		WheelState.bInContact ? FColor::Green : FColor::Red,
 		false,
 		-1.0f,
 		0,
 		1.0f
 	);
 
-	if (Wheel.bInContact)
+	if (WheelState.bInContact)
 	{
-		DrawDebugPoint(World, Wheel.ContactPoint, 8.0f, FColor::Yellow, false, -1.0f);
+		DrawDebugPoint(World, WheelState.ContactPoint, 8.0f, FColor::Yellow, false, -1.0f);
 		DrawDebugDirectionalArrow(
 			World,
-			Wheel.ContactPoint,
-			Wheel.ContactPoint + Wheel.ContactNormal * Wheel.SuspensionForce * 0.01f,
+			WheelState.ContactPoint,
+			WheelState.ContactPoint + WheelState.ContactNormal * WheelState.SuspensionForce * 0.01f,
 			100.0f,
 			FColor::Cyan,
 			false,
 			-1.0f
 		);
 		const FVector TireForce =
-			Wheel.LongitudinalAxis * Wheel.TireForces.Longitudinal
-			+ Wheel.LateralAxis * Wheel.TireForces.Lateral;
+			WheelState.LongitudinalAxis * WheelState.TireForces.Longitudinal
+			+ WheelState.LateralAxis * WheelState.TireForces.Lateral;
 		DrawDebugDirectionalArrow(
 			World,
-			Wheel.ContactPoint,
-			Wheel.ContactPoint + TireForce * 0.01f,
+			WheelState.ContactPoint,
+			WheelState.ContactPoint + TireForce * 0.01f,
 			100.0f,
 			FColor::Magenta,
 			false,
@@ -582,10 +650,14 @@ void UCirrovaVehicleComponent::DrawWheelDebug(
 	}
 }
 
-uint64 UCirrovaVehicleComponent::PortOf(uint64 Node, uint32 Index) const
+uint64 UCirrovaVehicleComponent::PortOf(
+	FLiminalVehicleHandle Handle,
+	uint64 Node,
+	uint32 Index
+) const
 {
 	uint64 Port = 0;
-	if (liminal_vehicle_port(VehicleHandle, Node, Index, &Port) != ELiminalStatus::Ok)
+	if (liminal_vehicle_port(Handle, Node, Index, &Port) != ELiminalStatus::Ok)
 	{
 		UE_LOG(
 			LogTemp,
@@ -599,10 +671,13 @@ uint64 UCirrovaVehicleComponent::PortOf(uint64 Node, uint32 Index) const
 	return Port;
 }
 
-bool UCirrovaVehicleComponent::Connect(uint64 SourcePort, uint64 TargetPort) const
+bool UCirrovaVehicleComponent::Connect(
+	FLiminalVehicleHandle Handle,
+	uint64 SourcePort,
+	uint64 TargetPort
+) const
 {
-	const ELiminalStatus Status =
-		liminal_vehicle_connect(VehicleHandle, SourcePort, TargetPort, nullptr);
+	const ELiminalStatus Status = liminal_vehicle_connect(Handle, SourcePort, TargetPort, nullptr);
 	if (Status != ELiminalStatus::Ok)
 	{
 		UE_LOG(
