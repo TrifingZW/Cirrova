@@ -16,7 +16,6 @@ class CIRROVA_API UCirrovaSchedulerSubsystem : public UWorldSubsystem
 {
 	GENERATED_BODY()
 
-private:
 	struct FRegisteredVehicle
 	{
 		TWeakObjectPtr<UCirrovaVehicleComponent> Component;

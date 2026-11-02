@@ -2,8 +2,8 @@
 
 #include "CirrovaVehicleAsync.h"
 #include "CirrovaVehicleComponent.h"
-#include "Engine/World.h"
 #include "PBDRigidsSolver.h"
+#include "Engine/World.h"
 #include "Physics/PhysicsInterfaceCore.h"
 #include "Physics/Experimental/PhysScene_Chaos.h"
 
@@ -35,10 +35,7 @@ void UCirrovaSchedulerSubsystem::Deinitialize()
 	// 先摘除物理回调，再释放运行态，避免物理线程访问已销毁的 liminal 句柄。
 	UnbindEvent();
 
-	for (FRegisteredVehicle& Entry : Vehicles)
-	{
-		if (Entry.Runtime) { ReleaseSuspensionConstraints(*Entry.Runtime); }
-	}
+	for (FRegisteredVehicle& Entry : Vehicles) { if (Entry.Runtime) { ReleaseSuspensionConstraints(*Entry.Runtime); } }
 
 	ReleasePendingRuntimes();
 	Vehicles.Reset();
@@ -70,7 +67,7 @@ void UCirrovaSchedulerSubsystem::UnregisterVehicle(const UCirrovaVehicleComponen
 		if (Vehicles[Index].Component.Get() != Component) { continue; }
 
 		// 先释放原生悬挂约束（游戏线程 + 场景写锁），再移交运行态销毁。
-		// 运行态内保存的约束指针与标志在此处清空，在飞物理步会自动回退为力模式。
+		// 运行态内保存的约束指针与标志在此处清空，在飞物理步会自动回退为弹簧力施加。
 		if (Vehicles[Index].Runtime) { ReleaseSuspensionConstraints(*Vehicles[Index].Runtime); }
 
 		PendingRelease.Add(MoveTemp(Vehicles[Index].Runtime));
@@ -87,10 +84,7 @@ void UCirrovaSchedulerSubsystem::ReleaseSuspensionConstraints(FCirrovaVehicleRun
 			FPhysicsConstraintHandle Handle = Wheel.SuspensionConstraintHandle;
 			FPhysicsCommand::ExecuteWrite(
 				Handle,
-				[&Handle](const FPhysicsConstraintHandle&)
-				{
-					FPhysicsInterface::ReleaseConstraint(Handle);
-				}
+				[&Handle](const FPhysicsConstraintHandle&) { FPhysicsInterface::ReleaseConstraint(Handle); }
 			);
 		}
 
@@ -164,10 +158,7 @@ void UCirrovaSchedulerSubsystem::UnbindEvent()
 
 UCirrovaVehicleComponent* UCirrovaSchedulerSubsystem::FindComponent(int32 Id) const
 {
-	for (const FRegisteredVehicle& Entry : Vehicles)
-	{
-		if (Entry.Id == Id) { return Entry.Component.Get(); }
-	}
+	for (const FRegisteredVehicle& Entry : Vehicles) { if (Entry.Id == Id) { return Entry.Component.Get(); } }
 	return nullptr;
 }
 

@@ -27,6 +27,12 @@ struct FCirrovaWheelState
 	// 悬挂法向力（N）。
 	float SuspensionForce = 0.0f;
 
+	// 防倾杆附加法向力（N），正值为增加载荷。
+	float AntiRollForce = 0.0f;
+
+	// 轮胎摩擦圆使用的总法向载荷（N）。
+	float NormalLoad = 0.0f;
+
 	// 轮胎力解（SI）。
 	FLiminalTireForces TireForces{};
 
@@ -123,6 +129,65 @@ struct FCirrovaWheelConfig
 	float SuspensionMaxLength = 0.5f;
 };
 
+/** 防倾杆配置：成对车轮的扭转刚度。 */
+USTRUCT(BlueprintType)
+struct FCirrovaAntiRollBarConfig
+{
+	GENERATED_BODY()
+
+	// 车轮 A 在车轮配置中的索引。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|悬挂",
+		meta = (DisplayName = "车轮 A")
+	)
+	int32 WheelA = 0;
+
+	// 车轮 B 在车轮配置中的索引。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|悬挂",
+		meta = (DisplayName = "车轮 B")
+	)
+	int32 WheelB = 1;
+
+	// 扭转刚度（N/m）；0 表示禁用。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|悬挂",
+		meta = (DisplayName = "防倾杆刚度")
+	)
+	float Stiffness = 0.0f;
+};
+
+/** 发动机全油门扭矩曲线采样点。 */
+USTRUCT(BlueprintType)
+struct FCirrovaEngineCurvePoint
+{
+	GENERATED_BODY()
+
+	// 采样点转速（RPM）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "转速")
+	)
+	float RPM = 0.0f;
+
+	// 全油门扭矩相对峰值的比例 [0, 1]。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "扭矩比例")
+	)
+	float TorqueScale = 1.0f;
+};
+
 UCLASS(
 	Blueprintable,
 	BlueprintType,
@@ -172,6 +237,42 @@ public:
 	)
 	float EngineInertia = 0.5f;
 
+	// 全油门扭矩曲线；为空时扭矩随转速线性衰减。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "扭矩曲线")
+	)
+	TArray<FCirrovaEngineCurvePoint> EngineTorqueCurve{};
+
+	// 怠速转速（RPM）；0 表示关闭怠速控制。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "怠速转速")
+	)
+	float EngineIdleRPM = 0.0f;
+
+	// 怠速扭矩上限（N·m），仅在怠速转速大于 0 时生效。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "怠速扭矩上限")
+	)
+	float EngineIdleTorque = 40.0f;
+
+	// 满转速下的发动机制动扭矩（N·m）；0 表示关闭。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "发动机制动扭矩")
+	)
+	float EngineBrakingTorque = 0.0f;
+
 	// 变速箱传动比列表，挡位信号 1..N 依次选择。
 	UPROPERTY(
 		EditAnywhere,
@@ -199,32 +300,23 @@ public:
 	)
 	float AxleInertia = 0.5f;
 
-	// 是否使用粘性差速器（开式差速器的近似）；关闭则轮轴为刚性锁止。
+	// 是否使用差速器（开式差速 + 摩擦限滑）；关闭则轮轴为刚性锁止。
 	UPROPERTY(
 		EditAnywhere,
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|动力",
-		meta = (DisplayName = "粘性差速器")
+		meta = (DisplayName = "差速器")
 	)
 	bool bUseDifferential = true;
 
-	// 差速器转速差阻尼系数（N·s/rad），越大越接近锁止，越小越接近开式。
+	// 限滑摩擦约束的扭矩容量（N·m）；0 为纯开式差速，越大越接近锁止。
 	UPROPERTY(
 		EditAnywhere,
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|动力",
-		meta = (DisplayName = "差速器耦合系数")
+		meta = (DisplayName = "差速器限滑扭矩容量")
 	)
-	float DifferentialCoupling = 50.0f;
-
-	// 差速器扭矩容量（N·m）。
-	UPROPERTY(
-		EditAnywhere,
-		BlueprintReadOnly,
-		Category = "Cirrova载具组件|动力",
-		meta = (DisplayName = "差速器扭矩容量")
-	)
-	float DifferentialMaxTorque = 2000.0f;
+	float DifferentialMaxTorque = 100.0f;
 
 	// 车轮转动惯量（kg·m²）。
 	UPROPERTY(
@@ -235,7 +327,7 @@ public:
 	)
 	float WheelInertia = 1.5f;
 
-	// 车轮摩擦阻力矩（N·m）。
+	// 车轮库仑摩擦扭矩上限（N·m）；静止时在扭矩上限内锁止车轮。
 	UPROPERTY(
 		EditAnywhere,
 		BlueprintReadOnly,
@@ -262,6 +354,15 @@ public:
 	)
 	bool bUseNativeSuspension = true;
 
+	// 防倾杆：每项连接一对车轮，刚度 0 表示禁用。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|悬挂",
+		meta = (DisplayName = "防倾杆")
+	)
+	TArray<FCirrovaAntiRollBarConfig> AntiRollBars{};
+
 	// 轮胎峰值附着系数。
 	UPROPERTY(
 		EditAnywhere,
@@ -279,6 +380,33 @@ public:
 		meta = (DisplayName = "轮胎侧向刚度")
 	)
 	float TireLateralStiffness = 12000.0f;
+
+	// 载荷敏感度：μ = μ₀·(F_N/F_ref)^(-k)；0 关闭。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|轮胎",
+		meta = (DisplayName = "轮胎载荷敏感度")
+	)
+	float TireLoadSensitivity = 0.1f;
+
+	// 载荷敏感的参考法向载荷（N）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|轮胎",
+		meta = (DisplayName = "轮胎参考载荷")
+	)
+	float TireReferenceLoad = 2500.0f;
+
+	// 滚动阻力系数（无量纲）；0 关闭。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|轮胎",
+		meta = (DisplayName = "轮胎滚动阻力")
+	)
+	float TireRollingResistance = 0.015f;
 
 	// 最大转向角（度）。
 	UPROPERTY(
@@ -434,7 +562,7 @@ public:
 	// 由调度器在物理步进前调用：写入驾驶输入与底盘代理。
 	void ProduceAsyncInput(FCirrovaVehicleAsyncInput& Out) const;
 
-	// 由调度器在注册后调用：创建原生悬挂约束，失败时逐轮回退为力模式。
+	// 由调度器在注册后调用：创建原生悬挂约束，失败时逐轮回退为弹簧力施加。
 	void InitializeSuspensionConstraints(FCirrovaVehicleRuntime& Runtime);
 
 	// 由调度器在物理步进后调用：刷新游戏线程快照并广播接地事件。
@@ -459,6 +587,9 @@ private:
 
 	// 按默认布局构建 liminal 拓扑：驾驶舱、底盘、动力链与逐轮空间链。
 	bool BuildTopology(FCirrovaVehicleRuntime& Runtime);
+
+	// 校验防倾杆配置并写入运行态。
+	void BuildAntiRollBars(FCirrovaVehicleRuntime& Runtime) const;
 
 	// 从编译产物读取空间装配：悬挂参数、转向控制端口与轮心静止位姿。
 	bool ReadSpatialLinks(

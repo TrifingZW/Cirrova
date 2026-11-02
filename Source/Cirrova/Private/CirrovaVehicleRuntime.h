@@ -2,8 +2,8 @@
 
 #include "CoreMinimal.h"
 #include "CirrovaLiminalApi.h"
-#include "Chaos/ChaosEngineInterface.h"
 #include "CollisionQueryParams.h"
+#include "Chaos/ChaosEngineInterface.h"
 #include "Engine/EngineTypes.h"
 
 class AActor;
@@ -45,6 +45,9 @@ struct FCirrovaWheelRuntime
 	// 上一步压缩量（m）。
 	float PreviousCompression = 0.0f;
 
+	// 当前压缩量（m），供防倾杆成对求解。
+	float Compression = 0.0f;
+
 	// 首次求解标记：跳过一次压缩速度计算，避免出生时的阻尼冲击。
 	bool bSolved = false;
 
@@ -66,6 +69,8 @@ struct FCirrovaWheelRuntime
 
 	// 本步力解（SI，供输出快照）。
 	float SuspensionForce = 0.0f;
+	float AntiRollForce = 0.0f;
+	float NormalLoad = 0.0f;
 	FLiminalTireForces TireForces{};
 
 	// 原生悬挂约束：句柄在游戏线程创建与释放，物理线程只更新目标。
@@ -77,6 +82,14 @@ struct FCirrovaWheelRuntime
 	IPhysicsProxyBase* GroundProxy = nullptr;
 };
 
+/** 防倾杆运行态：成对车轮的附加法向力，物理线程读写。 */
+struct FCirrovaAntiRollBarRuntime
+{
+	int32 WheelA = 0;
+	int32 WheelB = 1;
+	float Stiffness = 0.0f;
+};
+
 /** 载具物理运行态：构建完成后归物理线程所有。 */
 struct FCirrovaVehicleRuntime
 {
@@ -84,16 +97,16 @@ struct FCirrovaVehicleRuntime
 	FCirrovaVehicleRuntime(const FCirrovaVehicleRuntime&) = delete;
 	FCirrovaVehicleRuntime& operator=(const FCirrovaVehicleRuntime&) = delete;
 
-	~FCirrovaVehicleRuntime()
-	{
-		if (Handle) { liminal_vehicle_free(Handle); }
-	}
+	~FCirrovaVehicleRuntime() { if (Handle) { liminal_vehicle_free(Handle); } }
 
 	// liminal 句柄。构建于游戏线程，注册后仅由物理线程访问；
 	// 销毁经求解器命令队列在物理线程执行，全程无并发访问。
 	FLiminalVehicleHandle Handle = nullptr;
 
 	TArray<FCirrovaWheelRuntime> Wheels;
+
+	// 防倾杆：成对车轮索引与扭转刚度（N/m）。
+	TArray<FCirrovaAntiRollBarRuntime> AntiRollBars;
 
 	float ChassisMass = 0.0f;
 
@@ -102,6 +115,9 @@ struct FCirrovaVehicleRuntime
 
 	float TireFriction = 1.0f;
 	float TireLateralStiffness = 0.0f;
+	float TireLoadSensitivity = 0.0f;
+	float TireReferenceLoad = 0.0f;
+	float TireRollingResistance = 0.0f;
 	float WheelInertia = 0.0f;
 
 	// 车轮射线碰撞通道。
@@ -134,6 +150,8 @@ struct FCirrovaWheelOutput
 	float Omega = 0.0f;
 	float SuspensionLength = 0.0f;
 	float SuspensionForce = 0.0f;
+	float AntiRollForce = 0.0f;
+	float NormalLoad = 0.0f;
 	FLiminalTireForces TireForces{};
 	FVector ContactPoint = FVector::ZeroVector;
 	FVector ContactNormal = FVector::UpVector;

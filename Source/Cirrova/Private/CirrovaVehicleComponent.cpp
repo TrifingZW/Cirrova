@@ -2,12 +2,12 @@
 
 #include "CirrovaSchedulerSubsystem.h"
 #include "CirrovaVehicleRuntime.h"
+#include "DrawDebugHelpers.h"
+#include "PBDRigidsSolver.h"
 #include "Chaos/ChaosScene.h"
 #include "Chaos/PBDSuspensionConstraintData.h"
 #include "Components/PrimitiveComponent.h"
-#include "DrawDebugHelpers.h"
 #include "Engine/World.h"
-#include "PBDRigidsSolver.h"
 #include "Physics/PhysicsInterfaceCore.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "PhysicsEngine/PhysicsObjectExternalInterface.h"
@@ -91,8 +91,8 @@ void UCirrovaVehicleComponent::BeginPlay()
 	}
 
 	UCirrovaSchedulerSubsystem* Scheduler = GetWorld()
-		                                          ? GetWorld()->GetSubsystem<UCirrovaSchedulerSubsystem>()
-		                                          : nullptr;
+		                                        ? GetWorld()->GetSubsystem<UCirrovaSchedulerSubsystem>()
+		                                        : nullptr;
 	if (!Scheduler)
 	{
 		UE_LOG(LogTemp, Error, TEXT("Cirrova 载具组件：未找到调度器子系统，组件已停用。"));
@@ -127,11 +127,8 @@ void UCirrovaVehicleComponent::BeginPlay()
 void UCirrovaVehicleComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	if (UCirrovaSchedulerSubsystem* Scheduler = GetWorld()
-		                                              ? GetWorld()->GetSubsystem<UCirrovaSchedulerSubsystem>()
-		                                              : nullptr)
-	{
-		Scheduler->UnregisterVehicle(this);
-	}
+		                                            ? GetWorld()->GetSubsystem<UCirrovaSchedulerSubsystem>()
+		                                            : nullptr) { Scheduler->UnregisterVehicle(this); }
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -165,10 +162,7 @@ void UCirrovaVehicleComponent::SetBrake(float Value) { BrakeInput = Value; }
 
 void UCirrovaVehicleComponent::SetGear(int32 Gear) { GearInput = Gear; }
 
-float UCirrovaVehicleComponent::GetEngineRPM() const
-{
-	return EngineOmega * 60.0f / static_cast<float>(2.0 * PI);
-}
+float UCirrovaVehicleComponent::GetEngineRPM() const { return EngineOmega * 60.0f / static_cast<float>(2.0 * PI); }
 
 float UCirrovaVehicleComponent::GetWheelAngularVelocity(int32 WheelIndex) const
 {
@@ -187,10 +181,7 @@ void UCirrovaVehicleComponent::ProduceAsyncInput(FCirrovaVehicleAsyncInput& Out)
 	const UPrimitiveComponent* Chassis = ChassisPrimitive.Get();
 	if (!Chassis) { return; }
 
-	if (const FBodyInstance* BodyInstance = Chassis->GetBodyInstance())
-	{
-		Out.Proxy = BodyInstance->GetPhysicsActor();
-	}
+	if (const FBodyInstance* BodyInstance = Chassis->GetBodyInstance()) { Out.Proxy = BodyInstance->GetPhysicsActor(); }
 	Out.TraceParams = FCollisionQueryParams(
 		SCENE_QUERY_STAT(CirrovaWheelTrace),
 		false,
@@ -213,7 +204,7 @@ void UCirrovaVehicleComponent::InitializeSuspensionConstraints(FCirrovaVehicleRu
 		UE_LOG(
 			LogTemp,
 			Warning,
-			TEXT("Cirrova 载具组件：底盘不是单粒子物理代理，悬挂回退为力模式。")
+			TEXT("Cirrova 载具组件：底盘不是单粒子物理代理，悬挂回退为弹簧力施加。")
 		);
 		return;
 	}
@@ -226,7 +217,7 @@ void UCirrovaVehicleComponent::InitializeSuspensionConstraints(FCirrovaVehicleRu
 		UE_LOG(
 			LogTemp,
 			Warning,
-			TEXT("Cirrova 载具组件：物理对象或求解器不可用，悬挂回退为力模式。")
+			TEXT("Cirrova 载具组件：物理对象或求解器不可用，悬挂回退为弹簧力施加。")
 		);
 		return;
 	}
@@ -242,7 +233,7 @@ void UCirrovaVehicleComponent::InitializeSuspensionConstraints(FCirrovaVehicleRu
 		UE_LOG(
 			LogTemp,
 			Warning,
-			TEXT("Cirrova 载具组件：无法获取物理场景，悬挂回退为力模式。")
+			TEXT("Cirrova 载具组件：无法获取物理场景，悬挂回退为弹簧力施加。")
 		);
 		return;
 	}
@@ -253,7 +244,7 @@ void UCirrovaVehicleComponent::InitializeSuspensionConstraints(FCirrovaVehicleRu
 		UE_LOG(
 			LogTemp,
 			Warning,
-			TEXT("Cirrova 载具组件：物理对象未就绪，悬挂回退为力模式。")
+			TEXT("Cirrova 载具组件：物理对象未就绪，悬挂回退为弹簧力施加。")
 		);
 		return;
 	}
@@ -267,7 +258,7 @@ void UCirrovaVehicleComponent::InitializeSuspensionConstraints(FCirrovaVehicleRu
 			UE_LOG(
 				LogTemp,
 				Warning,
-				TEXT("Cirrova 载具组件：车轮 %d 的自由长度不大于行程下限，悬挂回退为力模式。"),
+				TEXT("Cirrova 载具组件：车轮 %d 的自由长度不大于行程下限，悬挂回退为弹簧力施加。"),
 				Index
 			);
 			continue;
@@ -282,7 +273,7 @@ void UCirrovaVehicleComponent::InitializeSuspensionConstraints(FCirrovaVehicleRu
 			UE_LOG(
 				LogTemp,
 				Warning,
-				TEXT("Cirrova 载具组件：车轮 %d 悬挂约束创建失败，回退为力模式。"),
+				TEXT("Cirrova 载具组件：车轮 %d 悬挂约束创建失败，回退为弹簧力施加。"),
 				Index
 			);
 			continue;
@@ -296,7 +287,7 @@ void UCirrovaVehicleComponent::InitializeSuspensionConstraints(FCirrovaVehicleRu
 			UE_LOG(
 				LogTemp,
 				Warning,
-				TEXT("Cirrova 载具组件：车轮 %d 悬挂约束类型无效，回退为力模式。"),
+				TEXT("Cirrova 载具组件：车轮 %d 悬挂约束类型无效，回退为弹簧力施加。"),
 				Index
 			);
 			continue;
@@ -341,6 +332,8 @@ void UCirrovaVehicleComponent::ConsumeAsyncOutput(const FCirrovaVehicleOutput& I
 		Target.Omega = Source.Omega;
 		Target.SuspensionLength = Source.SuspensionLength;
 		Target.SuspensionForce = Source.SuspensionForce;
+		Target.AntiRollForce = Source.AntiRollForce;
+		Target.NormalLoad = Source.NormalLoad;
 		Target.TireForces = Source.TireForces;
 		Target.ContactPoint = Source.ContactPoint;
 		Target.ContactNormal = Source.ContactNormal;
@@ -352,6 +345,62 @@ void UCirrovaVehicleComponent::ConsumeAsyncOutput(const FCirrovaVehicleOutput& I
 	{
 		bWasGrounded = In.bGrounded;
 		OnVehicleGroundedEvent.Broadcast(bWasGrounded);
+	}
+}
+
+void UCirrovaVehicleComponent::BuildAntiRollBars(FCirrovaVehicleRuntime& Runtime) const
+{
+	Runtime.AntiRollBars.Reset();
+	TArray<uint64> RegisteredPairs;
+
+	for (int32 Index = 0; Index < AntiRollBars.Num(); ++Index)
+	{
+		const FCirrovaAntiRollBarConfig& Config = AntiRollBars[Index];
+		if (!WheelConfigs.IsValidIndex(Config.WheelA)
+			|| !WheelConfigs.IsValidIndex(Config.WheelB)
+			|| Config.WheelA == Config.WheelB)
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("Cirrova 载具组件：防倾杆 %d 的车轮索引无效，已跳过。"),
+				Index
+			);
+			continue;
+		}
+		if (!FMath::IsFinite(Config.Stiffness) || Config.Stiffness < 0.0f)
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("Cirrova 载具组件：防倾杆 %d 的刚度无效，已跳过。"),
+				Index
+			);
+			continue;
+		}
+		if (Config.Stiffness <= 0.0f) { continue; }
+
+		const int32 Low = FMath::Min(Config.WheelA, Config.WheelB);
+		const int32 High = FMath::Max(Config.WheelA, Config.WheelB);
+		const uint64 PairKey = (static_cast<uint64>(High) << 32) | static_cast<uint32>(Low);
+		if (RegisteredPairs.Contains(PairKey))
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("Cirrova 载具组件：防倾杆 %d 重复连接车轮 %d 与 %d，已跳过。"),
+				Index,
+				Low,
+				High
+			);
+			continue;
+		}
+		RegisteredPairs.Add(PairKey);
+
+		FCirrovaAntiRollBarRuntime& Bar = Runtime.AntiRollBars.AddDefaulted_GetRef();
+		Bar.WheelA = Config.WheelA;
+		Bar.WheelB = Config.WheelB;
+		Bar.Stiffness = Config.Stiffness;
 	}
 }
 
@@ -375,8 +424,12 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 	Runtime.MaxSteeringAngle = FMath::DegreesToRadians(MaxSteeringAngle);
 	Runtime.TireFriction = TireFriction;
 	Runtime.TireLateralStiffness = TireLateralStiffness;
+	Runtime.TireLoadSensitivity = TireLoadSensitivity;
+	Runtime.TireReferenceLoad = TireReferenceLoad;
+	Runtime.TireRollingResistance = TireRollingResistance;
 	Runtime.WheelInertia = WheelInertia;
 	Runtime.WheelTraceChannel = WheelTraceChannel.GetValue();
+	BuildAntiRollBars(Runtime);
 
 	uint64 Cockpit = 0;
 	uint64 Chassis = 0;
@@ -407,13 +460,29 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 	}
 	liminal_vehicle_add_chassis(Runtime.Handle, Mounts.GetData(), Mounts.Num(), &Chassis);
 
-	liminal_vehicle_add_engine(
-		Runtime.Handle,
-		EngineMaxTorque,
-		EngineMaxAngularVelocity,
-		EngineInertia,
-		&Engine
-	);
+	// 扭矩曲线：RPM → 归一化转速；为空时 liminal 退化为线性衰减。
+	constexpr float RpmToRadiansPerSecond = 2.0 * PI / 60.0;
+	TArray<FLiminalEngineCurvePoint> EngineCurvePoints;
+	EngineCurvePoints.Reserve(EngineTorqueCurve.Num());
+	for (const FCirrovaEngineCurvePoint& Point : EngineTorqueCurve)
+	{
+		FLiminalEngineCurvePoint& Converted = EngineCurvePoints.AddDefaulted_GetRef();
+		Converted.SpeedRatio = EngineMaxAngularVelocity > KINDA_SMALL_NUMBER
+			                       ? Point.RPM * RpmToRadiansPerSecond / EngineMaxAngularVelocity
+			                       : 0.0f;
+		Converted.TorqueScale = Point.TorqueScale;
+	}
+
+	FLiminalEngineParams EngineParams{};
+	EngineParams.MaxTorque = EngineMaxTorque;
+	EngineParams.MaxAngularVelocity = EngineMaxAngularVelocity;
+	EngineParams.Inertia = EngineInertia;
+	EngineParams.IdleAngularVelocity = EngineIdleRPM * RpmToRadiansPerSecond;
+	EngineParams.IdleTorqueLimit = EngineIdleTorque;
+	EngineParams.EngineBrakingTorque = EngineBrakingTorque;
+	EngineParams.Curve = EngineCurvePoints.Num() > 0 ? EngineCurvePoints.GetData() : nullptr;
+	EngineParams.CurveCount = static_cast<size_t>(EngineCurvePoints.Num());
+	liminal_vehicle_add_engine_with_params(Runtime.Handle, &EngineParams, &Engine);
 	liminal_vehicle_add_gearbox(
 		Runtime.Handle,
 		GearRatios.GetData(),
@@ -426,7 +495,6 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 		liminal_vehicle_add_differential(
 			Runtime.Handle,
 			static_cast<size_t>(WheelCount),
-			DifferentialCoupling,
 			DifferentialMaxTorque,
 			AxleInertia,
 			&Distributor
@@ -549,10 +617,7 @@ bool UCirrovaVehicleComponent::ReadSpatialLinks(
 	RestPoses.Init(FTransform::Identity, WheelNodes.Num());
 
 	size_t LinkCount = 0;
-	if (liminal_vehicle_spatial_link_count(Runtime.Handle, &LinkCount) != ELiminalStatus::Ok)
-	{
-		return false;
-	}
+	if (liminal_vehicle_spatial_link_count(Runtime.Handle, &LinkCount) != ELiminalStatus::Ok) { return false; }
 
 	for (size_t Index = 0; Index < LinkCount; ++Index)
 	{
@@ -629,7 +694,7 @@ void UCirrovaVehicleComponent::DrawWheelDebug(
 		DrawDebugDirectionalArrow(
 			World,
 			WheelState.ContactPoint,
-			WheelState.ContactPoint + WheelState.ContactNormal * WheelState.SuspensionForce * 0.01f,
+			WheelState.ContactPoint + WheelState.ContactNormal * WheelState.NormalLoad * 0.01f,
 			100.0f,
 			FColor::Cyan,
 			false,

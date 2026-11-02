@@ -40,6 +40,18 @@ struct FLiminalTireForces
 {
 	float Longitudinal;
 	float Lateral;
+	// 摩擦对车轮的反作用力矩（N·m），不含滚动阻力。
+	float WheelTorque;
+};
+
+// 轮胎模型参数：载荷敏感与滚动阻力非正值时关闭。
+struct FLiminalTireModel
+{
+	float FrictionCoefficient;
+	float LateralStiffness;
+	float LoadSensitivity;
+	float ReferenceLoad;
+	float RollingResistance;
 };
 
 struct FLiminalJointDesc
@@ -51,6 +63,26 @@ struct FLiminalJointDesc
 	float RestLength;
 	float MinLength;
 	float MaxLength;
+};
+
+// 发动机全油门扭矩曲线采样点：归一化角速度与扭矩比例。
+struct FLiminalEngineCurvePoint
+{
+	float SpeedRatio;
+	float TorqueScale;
+};
+
+// 发动机参数：曲线为空时线性衰减；怠速与制动参数为 0 时关闭。
+struct FLiminalEngineParams
+{
+	float MaxTorque;
+	float MaxAngularVelocity;
+	float Inertia;
+	float IdleAngularVelocity;
+	float IdleTorqueLimit;
+	float EngineBrakingTorque;
+	const FLiminalEngineCurvePoint* Curve;
+	size_t CurveCount;
 };
 
 // 刚体变换：旋转分量顺序为 (x, y, z, w)。
@@ -91,6 +123,11 @@ ELiminalStatus liminal_vehicle_add_engine(
 	float Inertia,
 	uint64* OutNode
 );
+ELiminalStatus liminal_vehicle_add_engine_with_params(
+	FLiminalVehicleHandle Vehicle,
+	const FLiminalEngineParams* Params,
+	uint64* OutNode
+);
 ELiminalStatus liminal_vehicle_add_gearbox(
 	FLiminalVehicleHandle Vehicle,
 	const float* Ratios,
@@ -107,7 +144,6 @@ ELiminalStatus liminal_vehicle_add_axle(
 ELiminalStatus liminal_vehicle_add_differential(
 	FLiminalVehicleHandle Vehicle,
 	size_t OutputCount,
-	float Coupling,
 	float MaxTorque,
 	float Inertia,
 	uint64* OutNode
@@ -123,7 +159,6 @@ ELiminalStatus liminal_vehicle_add_brake(FLiminalVehicleHandle Vehicle, float Ma
 ELiminalStatus liminal_vehicle_add_clutch(
 	FLiminalVehicleHandle Vehicle,
 	float MaxTorque,
-	float LockThreshold,
 	float Inertia,
 	uint64* OutNode
 );
@@ -145,6 +180,7 @@ ELiminalStatus liminal_vehicle_add_suspension(
 ELiminalStatus liminal_vehicle_add_knuckle(FLiminalVehicleHandle Vehicle, float MaxBrakeTorque, uint64* OutNode);
 ELiminalStatus liminal_vehicle_add_splitter(FLiminalVehicleHandle Vehicle, size_t OutputCount, uint64* OutNode);
 
+ELiminalStatus liminal_vehicle_port_count(FLiminalVehicleHandle Vehicle, uint64 Node, size_t* OutCount);
 ELiminalStatus liminal_vehicle_port(FLiminalVehicleHandle Vehicle, uint64 Node, size_t Index, uint64* OutPort);
 ELiminalStatus liminal_vehicle_connect(
 	FLiminalVehicleHandle Vehicle,
@@ -169,17 +205,8 @@ ELiminalStatus liminal_vehicle_signal_op(FLiminalVehicleHandle Vehicle, size_t I
 ELiminalStatus liminal_vehicle_spatial_link_count(FLiminalVehicleHandle Vehicle, size_t* OutCount);
 ELiminalStatus liminal_vehicle_spatial_link(FLiminalVehicleHandle Vehicle, size_t Index, FLiminalSpatialLink* OutLink);
 
-FLiminalTireForces liminal_tire_forces(
-	float FrictionCoefficient,
-	float LongitudinalStiffness,
-	float LateralStiffness,
-	float SlipRatio,
-	float SlipAngle,
-	float NormalForce
-);
 FLiminalTireForces liminal_tire_impulse_forces(
-	float FrictionCoefficient,
-	float LateralStiffness,
+	const FLiminalTireModel* Model,
 	float AngularVelocity,
 	float GroundSpeed,
 	float Radius,
@@ -189,4 +216,5 @@ FLiminalTireForces liminal_tire_impulse_forces(
 	float Dt
 );
 float liminal_suspension_force(float Stiffness, float Damping, float Compression, float CompressionVelocity);
+float liminal_anti_roll_force(float Stiffness, float CompressionA, float CompressionB);
 }

@@ -1,11 +1,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "CirrovaVehicleRuntime.h"
 #include "Chaos/SimCallbackInput.h"
 #include "Chaos/SimCallbackObject.h"
-#include "CirrovaVehicleRuntime.h"
 
 class UWorld;
+
 namespace Chaos
 {
 	class FCollisionContactModifier;
@@ -34,9 +35,9 @@ struct FCirrovaAsyncOutput : Chaos::FSimCallbackOutput
 
 /** Chaos 物理线程回调：在求解器子步内推进 liminal 并施加力。 */
 class FCirrovaAsyncCallback final : public Chaos::TSimCallbackObject<
-	                                    FCirrovaAsyncInput,
-	                                    FCirrovaAsyncOutput,
-	                                    Chaos::ESimCallbackOptions::Presimulate>
+		FCirrovaAsyncInput,
+		FCirrovaAsyncOutput,
+		Chaos::ESimCallbackOptions::Presimulate>
 {
 public:
 	virtual void OnPreSimulate_Internal() override;
