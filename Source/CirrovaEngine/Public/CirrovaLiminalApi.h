@@ -1,8 +1,12 @@
 #pragma once
 
+#include <cstddef>
+
 #include "CoreMinimal.h"
 
 // liminal C ABI 绑定，与 ThirdParty/liminal/src/capi.rs 一一对应。
+// 修改任何结构体布局或函数签名时须同步递增 LiminalAbiVersion 与 Rust 侧常量。
+constexpr uint32 LiminalAbiVersion = 2;
 // 契约见 ThirdParty/liminal/docs/adapter-contract.md。
 // 使用前须先构建 Rust 静态库：cd ThirdParty/liminal && cargo build --release。
 
@@ -52,6 +56,17 @@ struct FLiminalTireModel
 	float LoadSensitivity;
 	float ReferenceLoad;
 	float RollingResistance;
+};
+
+// 约束式轮胎耦合的力界与外部力（N）。
+struct FLiminalTireConstraint
+{
+	// 载荷敏感后的摩擦圆上限，作为纵向与侧向冲量的共同界。
+	float FrictionForce;
+	// 侧向力（含低速速度阻尼，已按摩擦圆裁剪）。
+	float LateralForce;
+	// 滚动阻力（逆向地面速度，不产生车轮反作用）。
+	float RollingForce;
 };
 
 struct FLiminalJointDesc
@@ -111,7 +126,26 @@ struct FLiminalSpatialLink
 
 using FLiminalVehicleHandle = void*;
 
+// 布局校验：Rust 侧为 #[repr(C)]，字段偏移必须与 C++ 侧一致。
+static_assert(sizeof(FLiminalVec3) == 12, "FLiminalVec3 布局漂移");
+static_assert(sizeof(FLiminalTireForces) == 12, "FLiminalTireForces 布局漂移");
+static_assert(sizeof(FLiminalTireModel) == 20, "FLiminalTireModel 布局漂移");
+static_assert(sizeof(FLiminalTireConstraint) == 12, "FLiminalTireConstraint 布局漂移");
+static_assert(sizeof(FLiminalJointDesc) == 36, "FLiminalJointDesc 布局漂移");
+static_assert(sizeof(FLiminalEngineCurvePoint) == 8, "FLiminalEngineCurvePoint 布局漂移");
+static_assert(sizeof(FLiminalFrame) == 28, "FLiminalFrame 布局漂移");
+static_assert(sizeof(FLiminalSignalOp) == 16, "FLiminalSignalOp 布局漂移");
+static_assert(offsetof(FLiminalSpatialLink, Joint) == 16, "FLiminalSpatialLink.Joint 偏移漂移");
+static_assert(sizeof(FLiminalEngineParams) == 40, "FLiminalEngineParams 布局漂移");
+static_assert(offsetof(FLiminalEngineParams, Curve) == 24, "FLiminalEngineParams.Curve 偏移漂移");
+static_assert(offsetof(FLiminalSpatialLink, ControlPort) == 56, "FLiminalSpatialLink.ControlPort 偏移漂移");
+static_assert(offsetof(FLiminalSpatialLink, HasControl) == 64, "FLiminalSpatialLink.HasControl 偏移漂移");
+static_assert(offsetof(FLiminalSpatialLink, RestPose) == 68, "FLiminalSpatialLink.RestPose 偏移漂移");
+static_assert(offsetof(FLiminalSpatialLink, PoseInRoot) == 96, "FLiminalSpatialLink.PoseInRoot 偏移漂移");
+static_assert(sizeof(FLiminalSpatialLink) == 128, "FLiminalSpatialLink 布局漂移");
+
 extern "C" {
+uint32 liminal_abi_version();
 FLiminalVehicleHandle liminal_vehicle_new();
 void liminal_vehicle_free(FLiminalVehicleHandle Vehicle);
 
@@ -199,12 +233,19 @@ ELiminalStatus liminal_vehicle_write_signal(FLiminalVehicleHandle Vehicle, uint6
 ELiminalStatus liminal_vehicle_write_torque(FLiminalVehicleHandle Vehicle, uint64 Port, float Torque);
 ELiminalStatus liminal_vehicle_read_signal(FLiminalVehicleHandle Vehicle, uint64 Port, float* OutValue);
 ELiminalStatus liminal_vehicle_read_omega(FLiminalVehicleHandle Vehicle, uint64 Port, float* OutOmega);
+// 轮端等效转动惯量（kg·m²），包含传动链折算惯量；端口不在动力岛内时返回 PortNotFound。
+ELiminalStatus liminal_vehicle_effective_inertia(
+	FLiminalVehicleHandle Vehicle,
+	uint64 Port,
+	float* OutInertia
+);
 
 ELiminalStatus liminal_vehicle_signal_op_count(FLiminalVehicleHandle Vehicle, size_t* OutCount);
 ELiminalStatus liminal_vehicle_signal_op(FLiminalVehicleHandle Vehicle, size_t Index, FLiminalSignalOp* OutOp);
 ELiminalStatus liminal_vehicle_spatial_link_count(FLiminalVehicleHandle Vehicle, size_t* OutCount);
 ELiminalStatus liminal_vehicle_spatial_link(FLiminalVehicleHandle Vehicle, size_t Index, FLiminalSpatialLink* OutLink);
 
+// 轮胎冲量解：LateralSpeed 为接触点侧向相对速度（m/s），用于低速侧向保持。
 FLiminalTireForces liminal_tire_impulse_forces(
 	const FLiminalTireModel* Model,
 	float AngularVelocity,
@@ -212,9 +253,18 @@ FLiminalTireForces liminal_tire_impulse_forces(
 	float Radius,
 	float WheelInertia,
 	float SlipAngle,
+	float LateralSpeed,
 	float NormalForce,
 	float Dt
 );
 float liminal_suspension_force(float Stiffness, float Damping, float Compression, float CompressionVelocity);
 float liminal_anti_roll_force(float Stiffness, float CompressionA, float CompressionB);
+// 约束式轮胎耦合：Sideslip 为侧偏角（弧度），LateralSpeed 与 GroundSpeed 为接触点相对速度（m/s）。
+FLiminalTireConstraint liminal_tire_constraint(
+	const FLiminalTireModel* Model,
+	float GroundSpeed,
+	float Sideslip,
+	float LateralSpeed,
+	float NormalForce
+);
 }

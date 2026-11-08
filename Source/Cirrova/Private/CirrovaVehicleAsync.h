@@ -5,23 +5,25 @@
 #include "Chaos/SimCallbackInput.h"
 #include "Chaos/SimCallbackObject.h"
 
-class UWorld;
-
 namespace Chaos
 {
 	class FCollisionContactModifier;
 }
 
+class FCirrovaWheelFrictionConstraints;
+
 /** 物理线程输入：本物理步要推进的所有载具。 */
 struct FCirrovaAsyncInput : Chaos::FSimCallbackInput
 {
 	TArray<FCirrovaVehicleAsyncInput> Vehicles;
-	TWeakObjectPtr<UWorld> World;
+
+	// 共享的轮胎摩擦约束容器；为空时载具回退为外力耦合。
+	FCirrovaWheelFrictionConstraints* WheelConstraints = nullptr;
 
 	void Reset()
 	{
 		Vehicles.Reset();
-		World.Reset();
+		WheelConstraints = nullptr;
 	}
 };
 
@@ -33,7 +35,7 @@ struct FCirrovaAsyncOutput : Chaos::FSimCallbackOutput
 	void Reset() { Vehicles.Reset(); }
 };
 
-/** Chaos 物理线程回调：在求解器子步内推进 liminal 并施加力。 */
+/** Chaos 物理线程回调：在求解器步内推进 liminal，写入或施加轮胎耦合。 */
 class FCirrovaAsyncCallback final : public Chaos::TSimCallbackObject<
 		FCirrovaAsyncInput,
 		FCirrovaAsyncOutput,

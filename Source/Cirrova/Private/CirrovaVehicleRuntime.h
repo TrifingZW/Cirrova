@@ -2,11 +2,9 @@
 
 #include "CoreMinimal.h"
 #include "CirrovaLiminalApi.h"
-#include "CollisionQueryParams.h"
 #include "Chaos/ChaosEngineInterface.h"
-#include "Engine/EngineTypes.h"
+#include "Chaos/PhysicsObject.h"
 
-class AActor;
 class IPhysicsProxyBase;
 
 namespace Chaos
@@ -20,8 +18,15 @@ struct FCirrovaWheelRuntime
 	// 悬挂上挂点（底盘本地空间，cm）。
 	FVector MountLocation = FVector::ZeroVector;
 
+	// 悬挂轴与转向轴（底盘本地空间，单位向量）。由空间域关节描述导出。
+	FVector SuspensionAxis = FVector::UpVector;
+	FVector SteeringAxis = FVector::UpVector;
+
 	// 车轮旋转轴端口（读角速度、注入反作用力矩）。
 	uint64 ShaftPort = 0;
+
+	// 轮胎摩擦约束在共享容器中的索引；仅物理线程读写。
+	int32 TireConstraintIndex = INDEX_NONE;
 
 	// 转向控制端口，0 表示不可转向。
 	uint64 SteeringPort = 0;
@@ -42,6 +47,13 @@ struct FCirrovaWheelRuntime
 	// 当前弹簧长度（m）。
 	float CurrentLength = 0.0f;
 
+	// 射线估计的弹簧长度（m），未启用原生约束时使用。
+	float RaycastLength = 0.0f;
+
+	// 原生悬挂约束上一物理步解出的弹簧长度（m）。
+	float ConstraintLength = 0.0f;
+	bool bConstraintLengthValid = false;
+
 	// 上一步压缩量（m）。
 	float PreviousCompression = 0.0f;
 
@@ -54,6 +66,12 @@ struct FCirrovaWheelRuntime
 	// 车轮角速度（rad/s）。
 	float Omega = 0.0f;
 
+	// 轮胎冲量模型使用的轮端等效转动惯量（kg·m²）。
+	float EffectiveInertia = 0.0f;
+
+	// 轮心（世界坐标，cm）。
+	FVector WheelCenter = FVector::ZeroVector;
+
 	// 接触解（世界坐标与接触坐标系）。
 	bool bInContact = false;
 	FVector ContactPoint = FVector::ZeroVector;
@@ -64,14 +82,59 @@ struct FCirrovaWheelRuntime
 	// 接触点速度缓存（世界坐标，cm/s）。
 	FVector ContactVelocity = FVector::ZeroVector;
 
-	// 本求解器步内各子步合力累计（世界坐标，N），施加后清零。
-	FVector AccumulatedForce = FVector::ZeroVector;
+	// 接触点地面速度（世界坐标，cm/s），含地面刚体的平动与转动贡献。
+	FVector GroundVelocity = FVector::ZeroVector;
+
+	// 滚动阻力（N），作为外部力施加于接触点；不产生车轮反作用。
+	float RollingResistance = 0.0f;
+
+	// 本求解器步内的支撑力（悬挂 + 防倾杆，世界坐标，N），施加后清零。
+	FVector SupportForce = FVector::ZeroVector;
+
+	// 本求解器步内待施加于接触点的轮胎力（世界坐标，N）：
+	// 外力回退为各内部子步的合力累计，约束模式为滚动阻力。
+	FVector TireForce = FVector::ZeroVector;
 
 	// 本步力解（SI，供输出快照）。
 	float SuspensionForce = 0.0f;
 	float AntiRollForce = 0.0f;
 	float NormalLoad = 0.0f;
 	FLiminalTireForces TireForces{};
+
+	// 接触点相对速度在接触坐标系下的分量（m/s）与侧偏角（rad）。
+	float ContactLongitudinalSpeed = 0.0f;
+	float ContactLateralSpeed = 0.0f;
+	float SlipAngleRad = 0.0f;
+
+	// 滑移率与轮面线速度（m/s）。
+	float SlipRatio = 0.0f;
+	float SurfaceSpeed = 0.0f;
+
+	// 压缩速度（m/s）与钳制标志。
+	float CompressionVelocity = 0.0f;
+	bool bCompressionVelocityClamped = false;
+
+	// 弹簧长度是否取自原生约束求解值。
+	bool bUsingConstraintLength = false;
+
+	// 输出的轮胎力只含摩擦分量，滚动阻力单独记录；力矩不含滚动阻力。
+	float TireFrictionLongitudinal = 0.0f;
+	float TireFrictionLateral = 0.0f;
+	float WheelTorque = 0.0f;
+
+	// 摩擦圆上限（N）、侧向界（N）与利用率；约束模式下与摩擦力求值对齐。
+	float FrictionForceLimit = 0.0f;
+	float PendingFrictionForceLimit = 0.0f;
+	float LateralForceLimit = 0.0f;
+	float FrictionUtilization = 0.0f;
+
+	// 该轮本步是否以轮胎约束进入求解器。
+	bool bTireConstraintApplied = false;
+
+	// 上一物理帧求解的冲量（N·s）与累计窗口（s）。
+	float LongitudinalImpulse = 0.0f;
+	float LateralImpulse = 0.0f;
+	float ImpulseWindow = 0.0f;
 
 	// 原生悬挂约束：句柄在游戏线程创建与释放，物理线程只更新目标。
 	bool bUseSuspensionConstraint = false;
@@ -110,6 +173,14 @@ struct FCirrovaVehicleRuntime
 
 	float ChassisMass = 0.0f;
 
+	// 轮胎以求解器约束耦合；容器不可用或悬挂未使用原生约束时为 false。
+	bool bUseTireConstraint = false;
+
+	// 本步耦合诊断：外力回退的内部子步数、求解器步长与轮胎约束形态。
+	int32 AppliedSubsteps = 1;
+	float SolverDeltaTime = 0.0f;
+	bool bTireConstraintCoupling = false;
+
 	// 最大转向角（弧度）。
 	float MaxSteeringAngle = 0.0f;
 
@@ -119,9 +190,6 @@ struct FCirrovaVehicleRuntime
 	float TireReferenceLoad = 0.0f;
 	float TireRollingResistance = 0.0f;
 	float WheelInertia = 0.0f;
-
-	// 车轮射线碰撞通道。
-	ECollisionChannel WheelTraceChannel = ECC_Visibility;
 
 	uint64 ThrottleSignalPort = 0;
 	uint64 SteeringSignalPort = 0;
@@ -136,7 +204,8 @@ struct FCirrovaVehicleAsyncInput
 	int32 VehicleId = INDEX_NONE;
 	FCirrovaVehicleRuntime* Runtime = nullptr;
 	IPhysicsProxyBase* Proxy = nullptr;
-	FCollisionQueryParams TraceParams;
+	// 游戏线程收集的宽相候选，物理线程只做窄相查询。
+	TArray<Chaos::FConstPhysicsObjectHandle> BlockingObjects;
 	float Throttle = 0.0f;
 	float Steering = 0.0f;
 	float Brake = 0.0f;
@@ -148,15 +217,40 @@ struct FCirrovaWheelOutput
 {
 	bool bInContact = false;
 	float Omega = 0.0f;
+	float SurfaceSpeed = 0.0f;
+	float EffectiveInertia = 0.0f;
 	float SuspensionLength = 0.0f;
 	float SuspensionForce = 0.0f;
 	float AntiRollForce = 0.0f;
 	float NormalLoad = 0.0f;
-	FLiminalTireForces TireForces{};
+	float Compression = 0.0f;
+	float CompressionVelocity = 0.0f;
+	bool bCompressionVelocityClamped = false;
+	bool bNativeSuspensionActive = false;
+	bool bUsingConstraintLength = false;
+	float SuspensionConstraintLength = 0.0f;
+	float TireLongitudinalForce = 0.0f;
+	float TireLateralForce = 0.0f;
+	float WheelTorque = 0.0f;
+	float RollingResistance = 0.0f;
+	float FrictionForceLimit = 0.0f;
+	float LateralForceLimit = 0.0f;
+	float FrictionUtilization = 0.0f;
+	bool bTireConstraintApplied = false;
+	float LongitudinalImpulse = 0.0f;
+	float LateralImpulse = 0.0f;
+	float ImpulseWindow = 0.0f;
+	float ContactLongitudinalSpeed = 0.0f;
+	float ContactLateralSpeed = 0.0f;
+	float SlipRatio = 0.0f;
+	float SlipAngleDegrees = 0.0f;
+	FVector SuspensionAxis = FVector::UpVector;
 	FVector ContactPoint = FVector::ZeroVector;
 	FVector ContactNormal = FVector::UpVector;
 	FVector LongitudinalAxis = FVector::ForwardVector;
 	FVector LateralAxis = FVector::RightVector;
+	FVector ContactVelocity = FVector::ZeroVector;
+	FVector GroundVelocity = FVector::ZeroVector;
 };
 
 /** 单载具输出快照，游戏线程只读。 */
@@ -164,6 +258,10 @@ struct FCirrovaVehicleOutput
 {
 	int32 VehicleId = INDEX_NONE;
 	bool bGrounded = false;
+	bool bSubstepBudgetExceeded = false;
+	bool bTireConstraintCoupling = false;
+	int32 AppliedSubsteps = 1;
+	float SolverDeltaTime = 0.0f;
 	float EngineOmega = 0.0f;
 	TArray<FCirrovaWheelOutput> Wheels;
 };

@@ -11,37 +11,338 @@ struct FCirrovaVehicleAsyncInput;
 struct FCirrovaVehicleOutput;
 struct FCirrovaVehicleRuntime;
 
-/** 单轮游戏线程快照：由调度器在物理步进后写入。 */
+/**
+ * 单轮遥测快照：由物理线程在每一步计算，游戏线程只读。
+ *
+ * 单位默认 SI：长度 m、速度 m/s、力 N、力矩 N·m；位置与线速度沿用 UE 的 cm 与 cm/s
+ * 并在字段名中标注。轮胎力只含摩擦分量，滚动阻力单独成项。
+ */
+USTRUCT(BlueprintType)
 struct FCirrovaWheelState
 {
+	GENERATED_BODY()
+
+#pragma region 装配
+
 	// 悬挂行程上限（m）与车轮半径（m），装配后不变。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "悬挂行程上限 (m)")
+	)
 	float MaxLength = 0.0f;
+
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "车轮半径 (m)")
+	)
 	float Radius = 0.35f;
 
+#pragma endregion
+
+#pragma region 车轮
+
 	// 车轮角速度（rad/s）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "车轮角速度 (rad/s)")
+	)
 	float Omega = 0.0f;
 
-	// 当前弹簧长度（m）。
+	// 轮面线速度（m/s）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "轮面线速度 (m/s)")
+	)
+	float SurfaceSpeed = 0.0f;
+
+	// 轮端等效转动惯量（kg·m²），含传动链折算。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "轮端等效惯量 (kg·m²)")
+	)
+	float EffectiveInertia = 0.0f;
+
+#pragma endregion
+
+#pragma region 接触
+
+	// 是否接地。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "接地")
+	)
+	bool bInContact = false;
+
+	// 接触点与法线（世界坐标，cm）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "接触点 (cm)")
+	)
+	FVector ContactPoint = FVector::ZeroVector;
+
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "接触法线")
+	)
+	FVector ContactNormal = FVector::UpVector;
+
+	// 接触坐标系：纵向为轮面在接触平面上的投影，侧向为法线与纵向的叉积。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "纵向轴")
+	)
+	FVector LongitudinalAxis = FVector::ForwardVector;
+
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "侧向轴")
+	)
+	FVector LateralAxis = FVector::RightVector;
+
+	// 接触点相对速度与地面速度（世界坐标，cm/s）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "接触点相对速度 (cm/s)")
+	)
+	FVector ContactVelocity = FVector::ZeroVector;
+
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "地面速度 (cm/s)")
+	)
+	FVector GroundVelocity = FVector::ZeroVector;
+
+	// 接触点在接触坐标系下的相对速度（m/s）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "纵向相对速度 (m/s)")
+	)
+	float ContactLongitudinalSpeed = 0.0f;
+
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "侧向相对速度 (m/s)")
+	)
+	float ContactLateralSpeed = 0.0f;
+
+	// 滑移率：(ω·R − v_l) / max(|v_l|, 1 m/s)；抱死时趋近 -1。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "滑移率")
+	)
+	float SlipRatio = 0.0f;
+
+	// 侧偏角：atan2(v_a, max(|v_l|, 1 m/s))，单位度。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "侧偏角 (deg)")
+	)
+	float SlipAngleDegrees = 0.0f;
+
+#pragma endregion
+
+#pragma region 悬挂
+
+	// 悬挂轴（底盘本地空间，单位向量）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "悬挂轴")
+	)
+	FVector SuspensionAxis = FVector::UpVector;
+
+	// 当前弹簧长度与压缩量（m）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "弹簧长度 (m)")
+	)
 	float SuspensionLength = 0.0f;
 
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "压缩量 (m)")
+	)
+	float Compression = 0.0f;
+
+	// 压缩速度（m/s），已按减振器泄压阀钳制。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "压缩速度 (m/s)")
+	)
+	float CompressionVelocity = 0.0f;
+
+	// 原始压缩速度是否超过 ±2 m/s 钳制。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "压缩速度已钳制")
+	)
+	bool bCompressionVelocityClamped = false;
+
 	// 悬挂法向力（N）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "悬挂法向力 (N)")
+	)
 	float SuspensionForce = 0.0f;
 
 	// 防倾杆附加法向力（N），正值为增加载荷。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "防倾杆附加力 (N)")
+	)
 	float AntiRollForce = 0.0f;
 
 	// 轮胎摩擦圆使用的总法向载荷（N）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "轮胎法向载荷 (N)")
+	)
 	float NormalLoad = 0.0f;
 
-	// 轮胎力解（SI）。
-	FLiminalTireForces TireForces{};
+	// 该轮是否启用了原生悬挂约束。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "原生悬挂约束")
+	)
+	bool bNativeSuspensionActive = false;
 
-	// 接触解（世界坐标）。
-	bool bInContact = false;
-	FVector ContactPoint = FVector::ZeroVector;
-	FVector ContactNormal = FVector::UpVector;
-	FVector LongitudinalAxis = FVector::ForwardVector;
-	FVector LateralAxis = FVector::RightVector;
+	// 弹簧长度是否取自约束求解值；false 时取自射线估计。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "约束长度有效")
+	)
+	bool bUsingConstraintLength = false;
+
+	// 原生悬挂约束上一物理步解出的长度（m）；无效时为 0。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "约束求解长度 (m)")
+	)
+	float SuspensionConstraintLength = 0.0f;
+
+#pragma endregion
+
+#pragma region 轮胎
+
+	// 摩擦圆内的轮胎纵向力（N），不含滚动阻力。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "轮胎纵向力 (N)")
+	)
+	float TireLongitudinalForce = 0.0f;
+
+	// 摩擦圆内的轮胎侧向力（N）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "轮胎侧向力 (N)")
+	)
+	float TireLateralForce = 0.0f;
+
+	// 摩擦对车轮的反作用力矩（N·m），不含滚动阻力。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "车轮反作用力矩 (N·m)")
+	)
+	float WheelTorque = 0.0f;
+
+	// 滚动阻力（N，带符号，逆向地面速度）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "滚动阻力 (N)")
+	)
+	float RollingResistance = 0.0f;
+
+	// 载荷敏感后的摩擦圆上限（N）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "摩擦圆上限 (N)")
+	)
+	float FrictionForceLimit = 0.0f;
+
+	// 轮胎模型给出的侧向力界（N）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "侧向力界 (N)")
+	)
+	float LateralForceLimit = 0.0f;
+
+	// 摩擦圆利用率：hypot(纵向力, 侧向力) / 摩擦圆上限。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "摩擦圆利用率")
+	)
+	float FrictionUtilization = 0.0f;
+
+#pragma endregion
+
+#pragma region 耦合
+
+	// 该轮本步是否以轮胎摩擦约束进入求解器。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "轮胎约束已启用")
+	)
+	bool bTireConstraintApplied = false;
+
+	// 上一物理帧求解的纵向冲量（N·s）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "纵向冲量 (N·s)")
+	)
+	float LongitudinalImpulse = 0.0f;
+
+	// 上一物理帧求解的侧向冲量（N·s）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "侧向冲量 (N·s)")
+	)
+	float LateralImpulse = 0.0f;
+
+	// 冲量累计窗口（s），即冲量换算为力的平均步长。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "冲量统计窗口 (s)")
+	)
+	float ImpulseWindow = 0.0f;
+
+#pragma endregion
 };
 
 #pragma region 委托签名
@@ -345,7 +646,7 @@ public:
 	)
 	float MaxBrakeTorque = 2000.0f;
 
-	// 使用 Chaos 原生悬挂约束；仅初始化时读取，运行时修改不生效。
+	// 使用 Chaos 原生悬挂约束（默认物理路径）；轮胎求解器约束独立于该开关。仅初始化时读取，运行时修改不生效。
 	UPROPERTY(
 		EditAnywhere,
 		BlueprintReadOnly,
@@ -454,13 +755,25 @@ private:
 	// 底盘物理组件（拥有者根组件）。
 	TWeakObjectPtr<UPrimitiveComponent> ChassisPrimitive = nullptr;
 
-	// 游戏线程单轮快照。
+	// 游戏线程单轮遥测快照；由调度器在物理步进后写入。
+	UPROPERTY(
+		Transient,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (AllowPrivateAccess = "true", DisplayName = "车轮遥测")
+	)
 	TArray<FCirrovaWheelState> WheelStates;
 
 	// 悬挂上挂点（底盘本地空间，cm），供调试绘制。
 	TArray<FVector> WheelMountLocations;
 
 	// 发动机角速度（rad/s），由最近一次物理输出写入。
+	UPROPERTY(
+		Transient,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (AllowPrivateAccess = "true", DisplayName = "发动机角速度 (rad/s)")
+	)
 	float EngineOmega = 0.0f;
 
 	// 驾驶输入缓存。
@@ -471,6 +784,52 @@ private:
 
 	// 上一帧是否有任一车轮接地。
 	bool bWasGrounded = false;
+
+	// 子步预算耗尽警告是否已记录，避免物理线程逐帧刷日志。
+	bool bWarnedSubstepBudget = false;
+
+	// 耦合回退警告是否已记录。
+	bool bWarnedCouplingFallback = false;
+
+	// 接地但无悬挂载荷的累计时间与告警状态（检测双重支撑）。
+	float NoSuspensionLoadSeconds = 0.0f;
+	bool bWarnedNoSuspensionLoad = false;
+
+	// 本步轮胎耦合形态：true 为求解器约束，false 为外力回退。
+	UPROPERTY(
+		Transient,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (AllowPrivateAccess = "true", DisplayName = "轮胎约束耦合")
+	)
+	bool bDebugTireConstraintCoupling = false;
+
+	// 外力回退的内部子步数；约束模式恒为 1。
+	UPROPERTY(
+		Transient,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (AllowPrivateAccess = "true", DisplayName = "耦合子步数")
+	)
+	int32 DebugAppliedSubsteps = 1;
+
+	// 本步求解器步长（s），用于校验悬挂约束阻尼换算。
+	UPROPERTY(
+		Transient,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (AllowPrivateAccess = "true", DisplayName = "求解器步长 (s)")
+	)
+	float DebugSolverDeltaTime = 0.0f;
+
+	// 子步预算耗尽标志，仅外力回退可能置位。
+	UPROPERTY(
+		Transient,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (AllowPrivateAccess = "true", DisplayName = "子步预算耗尽")
+	)
+	bool bDebugSubstepBudgetExceeded = false;
 
 #pragma endregion
 
@@ -555,6 +914,22 @@ public:
 	)
 	bool IsGrounded() const;
 
+	// 指定车轮的多行遥测文本，供调试 HUD 直接显示。
+	UFUNCTION(
+		BlueprintPure,
+		Category = "Cirrova载具组件|调试",
+		meta = (DisplayName = "获取车轮调试文本")
+	)
+	FString GetWheelDebugText(int32 WheelIndex) const;
+
+	// 将耦合诊断与全部车轮遥测写入日志，供对照测试采集。
+	UFUNCTION(
+		BlueprintCallable,
+		Category = "Cirrova载具组件|调试",
+		meta = (DisplayName = "输出调试快照")
+	)
+	void LogDebugSnapshot() const;
+
 #pragma endregion
 
 #pragma region Scheduler Interface
@@ -585,6 +960,9 @@ private:
 
 #pragma region Internal Function
 
+	// 校验组件参数；失败时写入可直接展示的原因。
+	bool ValidateConfiguration(FString& OutError) const;
+
 	// 按默认布局构建 liminal 拓扑：驾驶舱、底盘、动力链与逐轮空间链。
 	bool BuildTopology(FCirrovaVehicleRuntime& Runtime);
 
@@ -603,7 +981,7 @@ private:
 	void DrawWheelDebug(
 		const FCirrovaWheelState& WheelState,
 		const FVector& MountWorld,
-		const FVector& ChassisUp
+		const FTransform& ChassisToWorld
 	) const;
 
 	// 读取节点端口句柄，失败返回 0。

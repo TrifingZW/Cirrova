@@ -1,11 +1,46 @@
 #include "CirrovaSchedulerSubsystem.h"
 
+#include "CirrovaLog.h"
 #include "CirrovaVehicleAsync.h"
 #include "CirrovaVehicleComponent.h"
+#include "CirrovaWheelFrictionConstraints.h"
+#include "Chaos/PBDRigidsEvolutionGBF.h"
 #include "PBDRigidsSolver.h"
 #include "Engine/World.h"
 #include "Physics/PhysicsInterfaceCore.h"
 #include "Physics/Experimental/PhysScene_Chaos.h"
+
+namespace
+{
+	/** 已脱离求解器、等待世界对象失效后释放的约束容器。 */
+	struct FRetiredWheelConstraints
+	{
+		TWeakObjectPtr<UWorld> World;
+		TUniquePtr<FCirrovaWheelFrictionConstraints> Constraints;
+	};
+
+	TArray<FRetiredWheelConstraints>& RetiredWheelConstraints()
+	{
+		static TArray<FRetiredWheelConstraints> Retired;
+		return Retired;
+	}
+
+	/** 世界对象失效意味着其物理场景已销毁，此时释放容器不再与求解器生命周期交错。 */
+	void PruneRetiredWheelConstraints()
+	{
+		TArray<FRetiredWheelConstraints>& Retired = RetiredWheelConstraints();
+		for (int32 Index = Retired.Num() - 1; Index >= 0; --Index)
+		{
+			if (!Retired[Index].World.IsValid()) { Retired.RemoveAtSwap(Index); }
+		}
+	}
+}
+
+UCirrovaSchedulerSubsystem::~UCirrovaSchedulerSubsystem()
+{
+	// 正常路径下容器已在 Deinitialize 中移交延迟回收；此处仅处理未初始化即销毁的退路。
+	WheelConstraints.Reset();
+}
 
 void UCirrovaSchedulerSubsystem::PostInitialize()
 {
@@ -14,12 +49,15 @@ void UCirrovaSchedulerSubsystem::PostInitialize()
 	UWorld* World = GetWorld();
 	if (!World || !World->IsGameWorld()) { return; }
 
+	// 新世界启动时回收已失效世界的容器。
+	PruneRetiredWheelConstraints();
+
 	// 编辑器预览等无物理场景的世界同样会创建本子系统，此时跳过绑定。
 	PhysicsScene = World->GetPhysicsScene();
 	if (!PhysicsScene)
 	{
 		UE_LOG(
-			LogTemp,
+			LogCirrova,
 			Warning,
 			TEXT("Cirrova 调度器：世界 %s 没有物理场景，载具模拟停用。"),
 			*GetNameSafe(World)
@@ -35,10 +73,24 @@ void UCirrovaSchedulerSubsystem::Deinitialize()
 	// 先摘除物理回调，再释放运行态，避免物理线程访问已销毁的 liminal 句柄。
 	UnbindEvent();
 
-	for (FRegisteredVehicle& Entry : Vehicles) { if (Entry.Runtime) { ReleaseSuspensionConstraints(*Entry.Runtime); } }
-
-	ReleasePendingRuntimes();
+	for (FRegisteredVehicle& Entry : Vehicles)
+	{
+		if (!Entry.Runtime) { continue; }
+		ReleaseSuspensionConstraints(*Entry.Runtime);
+		PendingRelease.Add(MoveTemp(Entry.Runtime));
+	}
 	Vehicles.Reset();
+	ReleasePendingRuntimes();
+
+	// 物理已停止步进：摘除共享容器的图边并放弃粒子关联；
+	// 容器移交延迟回收，等世界对象失效（物理场景必已销毁）后再释放。
+	if (WheelConstraints)
+	{
+		WheelConstraints->DetachFromSolver();
+		FRetiredWheelConstraints& Retired = RetiredWheelConstraints().AddDefaulted_GetRef();
+		Retired.World = GetWorld();
+		Retired.Constraints = MoveTemp(WheelConstraints);
+	}
 
 	Super::Deinitialize();
 }
@@ -57,6 +109,24 @@ bool UCirrovaSchedulerSubsystem::RegisterVehicle(
 
 	// 约束创建依赖物理对象与场景写锁，必须在游戏线程、注册成功后执行。
 	Component->InitializeSuspensionConstraints(*Entry.Runtime);
+
+	// 轮胎约束只依赖共享容器，与原生悬挂约束解耦：
+	// 悬挂约束不可用或未启用时，悬挂退回射线弹簧力，轮胎仍保留求解器约束耦合。
+	bool bNativeSuspension = !Entry.Runtime->Wheels.IsEmpty();
+	for (const FCirrovaWheelRuntime& Wheel : Entry.Runtime->Wheels)
+	{
+		bNativeSuspension &= Wheel.bUseSuspensionConstraint;
+	}
+	Entry.Runtime->bUseTireConstraint = !Entry.Runtime->Wheels.IsEmpty()
+		&& WheelConstraints.IsValid();
+	UE_LOG(
+		LogCirrova,
+		Log,
+		TEXT("Cirrova 调度器：载具 %d 的轮胎耦合为%s，悬挂为%s。"),
+		Entry.Id,
+		Entry.Runtime->bUseTireConstraint ? TEXT("求解器约束") : TEXT("外力回退"),
+		bNativeSuspension ? TEXT("原生约束") : TEXT("射线弹簧力")
+	);
 	return true;
 }
 
@@ -134,6 +204,24 @@ void UCirrovaSchedulerSubsystem::BindEvent()
 
 	// 载具模拟运行在物理子步内：PreSimulate 回调同时处理接触解与力施加。
 	AsyncCallback = Solver->CreateAndRegisterSimCallbackObject_External<FCirrovaAsyncCallback>();
+
+	// 轮胎摩擦约束容器注册到求解器演化；容器不可移除，随场景存活。
+	WheelConstraints = MakeUnique<FCirrovaWheelFrictionConstraints>();
+	if (auto* Evolution = Solver->GetEvolution())
+	{
+		WheelConstraints->SetIslandManager(&Evolution->GetIslandManager());
+		Evolution->AddConstraintContainer(*WheelConstraints, 0);
+		UE_LOG(LogCirrova, Log, TEXT("Cirrova 调度器：轮胎摩擦约束容器已注册。"));
+	}
+	else
+	{
+		WheelConstraints.Reset();
+		UE_LOG(
+			LogCirrova,
+			Warning,
+			TEXT("Cirrova 调度器：求解器未暴露演化对象，载具轮胎回退为外力耦合。")
+		);
+	}
 }
 
 void UCirrovaSchedulerSubsystem::UnbindEvent()
@@ -167,13 +255,13 @@ void UCirrovaSchedulerSubsystem::OnPhysScenePreTick(
 	const float DeltaTime
 )
 {
-	if (!AsyncCallback || !GetWorld()) { return; }
+	if (!AsyncCallback) { return; }
 
 	FCirrovaAsyncInput* Input = AsyncCallback->GetProducerInputData_External();
 	if (!Input) { return; }
 
 	Input->Reset();
-	Input->World = GetWorld();
+	Input->WheelConstraints = WheelConstraints.Get();
 	Input->Vehicles.Reserve(Vehicles.Num());
 
 	for (const FRegisteredVehicle& Entry : Vehicles)

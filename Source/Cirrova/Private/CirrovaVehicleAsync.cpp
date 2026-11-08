@@ -1,24 +1,25 @@
 #include "CirrovaVehicleAsync.h"
 
+#include "CirrovaWheelFrictionConstraints.h"
+#include "Chaos/PBDRigidsEvolutionGBF.h"
+#include "Chaos/PBDSuspensionConstraintData.h"
+#include "Chaos/PBDSuspensionConstraints.h"
 #include "Chaos/ParticleHandle.h"
 #include "Chaos/PhysicsObjectCollisionInterface.h"
 #include "Chaos/PhysicsObjectInternalInterface.h"
 #include "Chaos/Particle/ParticleUtilities.h"
 // FPhysicsObject 的完整定义位于 Chaos 私有头；物理对象查询需要其成员访问。
-#include "CollisionShape.h"
 #include "PBDRigidsSolver.h"
 #include "PhysicsPublic.h"
-#include "Engine/OverlapResult.h"
-#include "Engine/World.h"
-#include "Physics/GenericPhysicsInterface.h"
 #include "PhysicsProxy/SingleParticlePhysicsProxy.h"
+#include "PhysicsProxy/SuspensionConstraintProxy.h"
 #include "Runtime/Experimental/Chaos/Private/Chaos/PhysicsObjectInternal.h"
 
 using namespace Chaos;
 
 namespace
 {
-	// 内部子步上限：轮胎力与轮速为显式耦合，子步长须低于数值刚度阈值。
+	// 外力回退模式的内部子步上限：轮胎力与轮速为显式耦合，子步长须低于数值刚度阈值。
 	constexpr float MaxSubstepDeltaTime = 0.0025f;
 	constexpr int32 MaxSubstepsPerTick = 32;
 
@@ -40,73 +41,47 @@ namespace
 		return Handle ? Handle->CastToRigidParticle() : nullptr;
 	}
 
-	/** 收集所有车轮射线扫掠盒内的可阻挡物理对象，供物理线程窄相查询使用。 */
-	void GatherBlockingObjects(
-		const UWorld* World,
-		const FCollisionQueryParams& TraceParams,
-		ECollisionChannel TraceChannel,
-		const TArray<FCirrovaWheelRuntime>& Wheels,
-		const FTransform& ChassisToWorld,
-		TArray<FConstPhysicsObjectHandle>& OutObjects
-	)
+	Chaos::FVec3 ToChaosVector(const FVector& Vector)
 	{
-		if (!World) { return; }
-
-		const FVector Up = ChassisToWorld.GetUnitAxis(EAxis::Z);
-		FBox TraceBox(ForceInit);
-		for (const FCirrovaWheelRuntime& Wheel : Wheels)
-		{
-			const FVector Mount = ChassisToWorld.TransformPosition(Wheel.MountLocation);
-			const FVector End =
-				Mount - Up * ((Wheel.MaxLength + Wheel.Radius) * MeterToCentimeter);
-			TraceBox += Mount;
-			TraceBox += End;
-		}
-		if (!TraceBox.IsValid || TraceBox.GetSize().Length() <= KINDA_SMALL_NUMBER) { return; }
-
-		TArray<FOverlapResult> Overlaps;
-		FGenericPhysicsInterface::GeomOverlapMulti(
-			World,
-			FCollisionShape::MakeBox(TraceBox.GetExtent()),
-			TraceBox.GetCenter(),
-			FQuat::Identity,
-			Overlaps,
-			TraceChannel,
-			TraceParams,
-			FCollisionResponseParams::DefaultResponseParam,
-			FCollisionObjectQueryParams::DefaultObjectQueryParam
-		);
-
-		for (const FOverlapResult& Overlap : Overlaps)
-		{
-			if (!Overlap.bBlockingHit || !Overlap.PhysicsObject) { continue; }
-			if (!Overlap.PhysicsObject->GetParticle<EThreadContext::Internal>()) { continue; }
-			OutObjects.Add(Overlap.PhysicsObject);
-		}
+		return Chaos::FVec3(Vector.X, Vector.Y, Vector.Z);
 	}
 
-	/** 单轮接触解：射线、悬挂力、接触坐标系与接触点速度。 */
+	bool IsFiniteVector(const FVector& Vector)
+	{
+		return FMath::IsFinite(Vector.X) && FMath::IsFinite(Vector.Y) && FMath::IsFinite(Vector.Z);
+	}
+
+	/** 单轮接触解：射线、接触坐标系、地面速度与接触点相对速度。 */
 	void SolveContact(
 		FPhysicsObjectCollisionInterface_Internal& CollisionInterface,
-		const TArray<FConstPhysicsObjectHandle>& BlockingObjects,
+		const TArray<Chaos::FConstPhysicsObjectHandle>& BlockingObjects,
 		const FGeometryParticleHandle* ChassisParticle,
 		const FTransform& ChassisToWorld,
 		const FVector& ChassisUp,
 		const FVector& LinearVelocity,
 		const FVector& AngularVelocity,
 		const FVector& CenterOfMass,
-		float DeltaTime,
 		float SteeringAngle,
 		FCirrovaWheelRuntime& Wheel
 	)
 	{
 		const FVector MountWorld = ChassisToWorld.TransformPosition(Wheel.MountLocation);
-		const float TraceLength = (Wheel.MaxLength + Wheel.Radius) * MeterToCentimeter;
-		const FVector TraceEnd = MountWorld - ChassisUp * TraceLength;
+		FVector SuspensionAxis =
+			ChassisToWorld.TransformVectorNoScale(Wheel.SuspensionAxis).GetSafeNormal();
+		if (SuspensionAxis.IsNearlyZero()) { SuspensionAxis = ChassisUp; }
+
+		// 沿悬挂轴下探；轴越倾斜，轮心沿射线方向的半径补偿越长。
+		const float AxisVertical = FMath::Max(
+			FMath::Abs(FVector::DotProduct(SuspensionAxis, ChassisUp)),
+			0.25f
+		);
+		const float TraceLength =
+			(Wheel.MaxLength + Wheel.Radius / AxisVertical) * MeterToCentimeter;
+		const FVector TraceEnd = MountWorld - SuspensionAxis * TraceLength;
 
 		Wheel.bInContact = false;
 		Wheel.GroundProxy = nullptr;
-		Wheel.CurrentLength = Wheel.MaxLength;
+		Wheel.RaycastLength = Wheel.MaxLength;
 		FVector GroundVelocity = FVector::ZeroVector;
 		if (!BlockingObjects.IsEmpty())
 		{
@@ -127,8 +102,13 @@ namespace
 				Wheel.ContactPoint = Hit.WorldPosition;
 				Wheel.ContactNormal = Hit.WorldNormal.GetSafeNormal();
 				if (Wheel.ContactNormal.IsNearlyZero()) { Wheel.ContactNormal = ChassisUp; }
-				Wheel.CurrentLength = FMath::Clamp(
-					Hit.Distance * CentimeterToMeter - Wheel.Radius,
+
+				// 轮心沿接触法线偏移半径；弹簧长度取挂点到轮心的轴向距离。
+				Wheel.WheelCenter =
+					Wheel.ContactPoint + Wheel.ContactNormal * (Wheel.Radius * MeterToCentimeter);
+				Wheel.RaycastLength = FMath::Clamp(
+					FVector::DotProduct(MountWorld - Wheel.WheelCenter, SuspensionAxis)
+					* CentimeterToMeter,
 					Wheel.MinLength,
 					Wheel.MaxLength
 				);
@@ -141,10 +121,7 @@ namespace
 					GroundVelocity =
 						FVector(GroundParticle->GetV())
 						+ FVector::CrossProduct(FVector(GroundParticle->GetW()), GroundArm);
-					if (GroundVelocity.ContainsNaN()
-						|| !FMath::IsFinite(GroundVelocity.X)
-						|| !FMath::IsFinite(GroundVelocity.Y)
-						|| !FMath::IsFinite(GroundVelocity.Z)) { GroundVelocity = FVector::ZeroVector; }
+					if (!IsFiniteVector(GroundVelocity)) { GroundVelocity = FVector::ZeroVector; }
 				}
 			}
 		}
@@ -152,31 +129,17 @@ namespace
 		{
 			Wheel.ContactPoint = TraceEnd;
 			Wheel.ContactNormal = ChassisUp;
+			Wheel.WheelCenter = MountWorld - SuspensionAxis * (Wheel.MaxLength * MeterToCentimeter);
+			Wheel.RaycastLength = Wheel.MaxLength;
 		}
 
-		const float Compression = Wheel.RestLength - Wheel.CurrentLength;
-		float CompressionVelocity = 0.0f;
-		if (Wheel.bSolved)
-		{
-			CompressionVelocity = FMath::Clamp(
-				(Compression - Wheel.PreviousCompression) / DeltaTime,
-				-MaxCompressionVelocity,
-				MaxCompressionVelocity
-			);
-		}
-		Wheel.PreviousCompression = Compression;
-		Wheel.Compression = Compression;
-		Wheel.bSolved = true;
-		Wheel.SuspensionForce = Wheel.bInContact
-			                        ? liminal_suspension_force(
-				                        Wheel.SuspensionStiffness,
-				                        Wheel.SuspensionDamping,
-				                        Compression,
-				                        CompressionVelocity
-			                        )
-			                        : 0.0f;
-
-		const FQuat SteeringRotation(ChassisUp, Wheel.bSteerable ? SteeringAngle : 0.0f);
+		FVector SteeringAxis =
+			ChassisToWorld.TransformVectorNoScale(Wheel.SteeringAxis).GetSafeNormal();
+		if (SteeringAxis.IsNearlyZero()) { SteeringAxis = ChassisUp; }
+		const FQuat SteeringRotation(
+			SteeringAxis,
+			Wheel.bSteerable ? SteeringAngle : 0.0f
+		);
 		FVector Forward =
 			SteeringRotation.RotateVector(ChassisToWorld.GetUnitAxis(EAxis::X));
 		Forward = (Forward - Wheel.ContactNormal * FVector::DotProduct(Forward, Wheel.ContactNormal))
@@ -184,10 +147,117 @@ namespace
 		if (Forward.IsNearlyZero()) { Forward = ChassisToWorld.GetUnitAxis(EAxis::X); }
 		Wheel.LongitudinalAxis = Forward;
 		Wheel.LateralAxis = FVector::CrossProduct(Wheel.ContactNormal, Forward).GetSafeNormal();
+		if (Wheel.LateralAxis.IsNearlyZero()) { Wheel.LateralAxis = ChassisToWorld.GetUnitAxis(EAxis::Y); }
 
+		Wheel.GroundVelocity = GroundVelocity;
 		Wheel.ContactVelocity = LinearVelocity
 			+ FVector::CrossProduct(AngularVelocity, Wheel.ContactPoint - CenterOfMass)
 			- GroundVelocity;
+
+		Wheel.ContactLongitudinalSpeed =
+			FVector::DotProduct(Wheel.ContactVelocity, Wheel.LongitudinalAxis) * CentimeterToMeter;
+		Wheel.ContactLateralSpeed =
+			FVector::DotProduct(Wheel.ContactVelocity, Wheel.LateralAxis) * CentimeterToMeter;
+		Wheel.SlipAngleRad = FMath::Atan2(
+			Wheel.ContactLateralSpeed,
+			FMath::Max(FMath::Abs(Wheel.ContactLongitudinalSpeed), SlipReferenceSpeed)
+		);
+
+		// 非有限值归零，避免 NaN 沿遥测与轮胎模型传播。
+		if (!FMath::IsFinite(Wheel.ContactLongitudinalSpeed)) { Wheel.ContactLongitudinalSpeed = 0.0f; }
+		if (!FMath::IsFinite(Wheel.ContactLateralSpeed)) { Wheel.ContactLateralSpeed = 0.0f; }
+		if (!FMath::IsFinite(Wheel.SlipAngleRad)) { Wheel.SlipAngleRad = 0.0f; }
+	}
+
+	/** 读回原生悬挂约束的求解长度，并按求解器步长与位置迭代数刷新刚度/阻尼。 */
+	void RefreshSuspensionConstraints(
+		FCirrovaVehicleRuntime& Runtime,
+		FPhysicsSolver& Solver,
+		float SolverDeltaTime
+	)
+	{
+		auto* Evolution = Solver.GetEvolution();
+		if (!Evolution) { return; }
+
+		const int32 PositionIterations = FMath::Max(Evolution->GetNumPositionIterations(), 1);
+		const float IterationScale = 1.0f / static_cast<float>(PositionIterations);
+		FPBDSuspensionConstraints& Container = Evolution->GetSuspensionConstraints();
+
+		for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
+		{
+			if (!Wheel.bUseSuspensionConstraint || !Wheel.SuspensionConstraint) { continue; }
+
+			FSuspensionConstraintPhysicsProxy* Proxy =
+				Wheel.SuspensionConstraint->GetProxy<FSuspensionConstraintPhysicsProxy>();
+			FPBDSuspensionConstraintHandle* Handle = Proxy ? Proxy->GetHandle() : nullptr;
+			if (!Handle) { continue; }
+
+			const int32 Index = Handle->GetConstraintIndex();
+			if (Index == INDEX_NONE || Index >= Container.NumConstraints()) { continue; }
+
+			// 弹簧在每次位置迭代中完整施加，按迭代数折算，保持有效刚度/阻尼与 liminal 一致。
+			FPBDSuspensionSettings Settings = Container.GetSettings(Index);
+			Settings.SpringStiffness = FMath::Max(Wheel.SuspensionStiffness, 0.0f) * IterationScale;
+			Settings.SpringDamping = FMath::Max(Wheel.SuspensionDamping, 0.0f)
+				* SolverDeltaTime * IterationScale;
+			Container.SetSettings(Index, Settings);
+
+			const FPBDSuspensionResults& Results = Container.GetResults(Index);
+			if (Wheel.bInContact && FMath::IsFinite(Results.Length))
+			{
+				// Results.Length 是相对静止轮心的有符号位移（cm）：压缩为负、伸展为正；
+				// 还原为绝对弹簧长度 rest_length + 位移。
+				Wheel.ConstraintLength =
+					Wheel.RestLength + static_cast<float>(Results.Length) * CentimeterToMeter;
+				Wheel.bConstraintLengthValid = true;
+			}
+			else
+			{
+				// 约束未求解（离地或禁用）：退回射线估计，避免使用陈旧的弹簧长度。
+				Wheel.ConstraintLength = 0.0f;
+				Wheel.bConstraintLengthValid = false;
+			}
+		}
+	}
+
+	/** 由压缩量与压缩速度得到悬挂法向力；原生约束模式下长度取约束求解值。 */
+	void ResolveSuspensionLoad(FCirrovaWheelRuntime& Wheel, float DeltaTime)
+	{
+		const bool bUseConstraintLength =
+			Wheel.bUseSuspensionConstraint && Wheel.bConstraintLengthValid && Wheel.bInContact;
+		const float Length = bUseConstraintLength
+			                     ? FMath::Clamp(Wheel.ConstraintLength, Wheel.MinLength, Wheel.MaxLength)
+			                     : Wheel.RaycastLength;
+		Wheel.CurrentLength = Length;
+
+		const float Compression = FMath::Max(Wheel.RestLength - Length, 0.0f);
+		float CompressionVelocity = 0.0f;
+		Wheel.bCompressionVelocityClamped = false;
+		if (Wheel.bSolved && DeltaTime > KINDA_SMALL_NUMBER)
+		{
+			const float RawCompressionVelocity = (Compression - Wheel.PreviousCompression) / DeltaTime;
+			Wheel.bCompressionVelocityClamped = FMath::Abs(RawCompressionVelocity) > MaxCompressionVelocity;
+			CompressionVelocity = FMath::Clamp(
+				RawCompressionVelocity,
+				-MaxCompressionVelocity,
+				MaxCompressionVelocity
+			);
+		}
+		Wheel.CompressionVelocity = CompressionVelocity;
+		Wheel.bUsingConstraintLength = bUseConstraintLength;
+		Wheel.PreviousCompression = Compression;
+		Wheel.Compression = Compression;
+		Wheel.bSolved = true;
+
+		const float Force = Wheel.bInContact
+			                    ? liminal_suspension_force(
+				                    Wheel.SuspensionStiffness,
+				                    Wheel.SuspensionDamping,
+				                    Compression,
+				                    CompressionVelocity
+			                    )
+			                    : 0.0f;
+		Wheel.SuspensionForce = FMath::IsFinite(Force) ? Force : 0.0f;
 	}
 
 	/** 成对求解防倾杆：两侧均接地时产生等量反向的附加法向力。 */
@@ -215,28 +285,62 @@ namespace
 		}
 	}
 
-	/** 单轮轮胎冲量解与车轮反作用力矩回注。 */
-	void SolveTire(FCirrovaVehicleRuntime& Runtime, FCirrovaWheelRuntime& Wheel, float SubDeltaTime)
+	/** 由悬挂与防倾杆支撑力得到法向载荷与待施加支撑力。 */
+	void ResolveWheelSupport(
+		const FTransform& ChassisToWorld,
+		const FVector& ChassisUp,
+		FCirrovaWheelRuntime& Wheel
+	)
+	{
+		if (!Wheel.bInContact)
+		{
+			Wheel.NormalLoad = 0.0f;
+			Wheel.SupportForce = FVector::ZeroVector;
+			return;
+		}
+
+		FVector Axis = ChassisToWorld.TransformVectorNoScale(Wheel.SuspensionAxis).GetSafeNormal();
+		if (Axis.IsNearlyZero()) { Axis = ChassisUp; }
+
+		const float CalculatedSupport = Wheel.SuspensionForce + Wheel.AntiRollForce;
+		Wheel.NormalLoad = FMath::Max(
+			FVector::DotProduct(Axis * CalculatedSupport, Wheel.ContactNormal),
+			0.0f
+		);
+
+		// 原生悬挂约束已承担弹簧力，适配层只施加防倾杆力。
+		const float AppliedSuspension = Wheel.bUseSuspensionConstraint ? 0.0f : Wheel.SuspensionForce;
+		Wheel.SupportForce = Axis * (AppliedSuspension + Wheel.AntiRollForce);
+	}
+
+	/** 外力回退的单轮轮胎冲量解与车轮反作用力矩回注。 */
+	void SolveTire(
+		FCirrovaVehicleRuntime& Runtime,
+		FCirrovaWheelRuntime& Wheel,
+		float SubDeltaTime,
+		int32 GroundedWheelCount
+	)
 	{
 		Wheel.TireForces = FLiminalTireForces{};
-		if (!Wheel.bInContact) { return; }
+		Wheel.TireFrictionLongitudinal = 0.0f;
+		Wheel.TireFrictionLateral = 0.0f;
+		Wheel.WheelTorque = 0.0f;
+		Wheel.RollingResistance = 0.0f;
+		Wheel.FrictionForceLimit = 0.0f;
+		Wheel.PendingFrictionForceLimit = 0.0f;
+		Wheel.LateralForceLimit = 0.0f;
+		Wheel.FrictionUtilization = 0.0f;
+		Wheel.SlipRatio = 0.0f;
+		Wheel.SurfaceSpeed = Wheel.Omega * Wheel.Radius;
+		Wheel.bTireConstraintApplied = false;
+		if (!Wheel.bInContact || Wheel.NormalLoad <= 0.0f) { return; }
 
-		// 未启用原生悬挂约束时，弹簧力由适配层施加；
-		// 防倾杆不属于弹簧约束，两种方式下都由适配层施加。
-		if (!Wheel.bUseSuspensionConstraint) { Wheel.AccumulatedForce += Wheel.ContactNormal * Wheel.SuspensionForce; }
-		if (Wheel.AntiRollForce != 0.0f) { Wheel.AccumulatedForce += Wheel.ContactNormal * Wheel.AntiRollForce; }
-
-		// 法向载荷非正时轮胎无法传递力，但悬挂与防倾杆力已计入累加器。
-		if (Wheel.NormalLoad <= 0.0f) { return; }
-
-		const float LongitudinalSpeed =
-			FVector::DotProduct(Wheel.ContactVelocity, Wheel.LongitudinalAxis) * CentimeterToMeter;
-		const float LateralSpeed =
-			FVector::DotProduct(Wheel.ContactVelocity, Wheel.LateralAxis) * CentimeterToMeter;
-
-		const float SlipAngle = FMath::Atan2(
-			LateralSpeed,
-			FMath::Max(FMath::Abs(LongitudinalSpeed), SlipReferenceSpeed)
+		const float LongitudinalSpeed = Wheel.ContactLongitudinalSpeed;
+		const float LateralSpeed = Wheel.ContactLateralSpeed;
+		const float SlipAngle = Wheel.SlipAngleRad;
+		Wheel.SlipRatio = (Wheel.SurfaceSpeed - LongitudinalSpeed) / FMath::Max(
+			FMath::Abs(LongitudinalSpeed),
+			SlipReferenceSpeed
 		);
 
 		const FLiminalTireModel Model{
@@ -246,22 +350,52 @@ namespace
 			Runtime.TireReferenceLoad,
 			Runtime.TireRollingResistance,
 		};
+		const float EffectiveInertia = Wheel.EffectiveInertia > 0.0f
+			                               ? Wheel.EffectiveInertia
+			                               : Runtime.WheelInertia;
 		Wheel.TireForces = liminal_tire_impulse_forces(
 			&Model,
 			Wheel.Omega,
 			LongitudinalSpeed,
 			Wheel.Radius,
-			Runtime.WheelInertia,
+			EffectiveInertia,
 			SlipAngle,
+			LateralSpeed,
 			Wheel.NormalLoad,
 			SubDeltaTime
 		);
+
+		if (!FMath::IsFinite(Wheel.TireForces.Longitudinal)
+			|| !FMath::IsFinite(Wheel.TireForces.Lateral)
+			|| !FMath::IsFinite(Wheel.TireForces.WheelTorque))
+		{
+			Wheel.TireForces = FLiminalTireForces{};
+			return;
+		}
+
+		// 遥测：摩擦圆界、侧向界与模型滚动阻力；纯函数求值，不参与本步力解。
+		const FLiminalTireConstraint Constraint = liminal_tire_constraint(
+			&Model,
+			LongitudinalSpeed,
+			SlipAngle,
+			LateralSpeed,
+			Wheel.NormalLoad
+		);
+		if (FMath::IsFinite(Constraint.FrictionForce)
+			&& FMath::IsFinite(Constraint.LateralForce)
+			&& FMath::IsFinite(Constraint.RollingForce))
+		{
+			Wheel.FrictionForceLimit = FMath::Max(Constraint.FrictionForce, 0.0f);
+			Wheel.PendingFrictionForceLimit = Wheel.FrictionForceLimit;
+			Wheel.LateralForceLimit = FMath::Abs(Constraint.LateralForce);
+			Wheel.RollingResistance = Constraint.RollingForce;
+		}
 
 		// 阻力侧零过冲：单轮阻力不得超过本步内使整车相对速度归零的分担量。
 		const float UnclampedLongitudinal = Wheel.TireForces.Longitudinal;
 		const float StopForceShare = Runtime.ChassisMass * FMath::Abs(LongitudinalSpeed) / (
 			FMath::Max(SubDeltaTime, KINDA_SMALL_NUMBER)
-			* static_cast<float>(FMath::Max(Runtime.Wheels.Num(), 1))
+			* static_cast<float>(FMath::Max(GroundedWheelCount, 1))
 		);
 		if (Wheel.TireForces.Longitudinal * LongitudinalSpeed < 0.0f
 			&& FMath::Abs(Wheel.TireForces.Longitudinal) > StopForceShare)
@@ -273,7 +407,17 @@ namespace
 		Wheel.TireForces.WheelTorque -=
 			(Wheel.TireForces.Longitudinal - UnclampedLongitudinal) * Wheel.Radius;
 
-		Wheel.AccumulatedForce += Wheel.LongitudinalAxis * Wheel.TireForces.Longitudinal
+		Wheel.WheelTorque = Wheel.TireForces.WheelTorque;
+		Wheel.TireFrictionLongitudinal = Wheel.TireForces.Longitudinal - Wheel.RollingResistance;
+		Wheel.TireFrictionLateral = Wheel.TireForces.Lateral;
+		Wheel.FrictionUtilization = Wheel.FrictionForceLimit > KINDA_SMALL_NUMBER
+			? FMath::Sqrt(
+				FMath::Square(Wheel.TireFrictionLongitudinal)
+				+ FMath::Square(Wheel.TireFrictionLateral)
+			) / Wheel.FrictionForceLimit
+			: 0.0f;
+
+		Wheel.TireForce += Wheel.LongitudinalAxis * Wheel.TireForces.Longitudinal
 			+ Wheel.LateralAxis * Wheel.TireForces.Lateral;
 
 		liminal_vehicle_write_torque(
@@ -283,11 +427,151 @@ namespace
 		);
 	}
 
-	/** 推进单载具：接触解、子步动力流与力施加。 */
+	/** 为当前载具的车轮分配共享容器中的约束槽位。 */
+	void BindTireConstraints(
+		FCirrovaWheelFrictionConstraints& Container,
+		FCirrovaVehicleRuntime& Runtime,
+		int32 VehicleId,
+		FGeometryParticleHandle* Particle
+	)
+	{
+		for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
+		{
+			if (!Container.IsBoundToOwner(Wheel.TireConstraintIndex, VehicleId))
+			{
+				Wheel.TireConstraintIndex = Container.AcquireConstraint(Particle, VehicleId);
+			}
+		}
+	}
+
+	/** 读取上一物理帧求解的轮胎冲量，换算为力与轮端反作用力矩。 */
+	void ReadTireConstraint(
+		FCirrovaWheelFrictionConstraints& Container,
+		FCirrovaWheelRuntime& Wheel
+	)
+	{
+		Wheel.TireForces = FLiminalTireForces{};
+		Wheel.RollingResistance = 0.0f;
+		Wheel.TireFrictionLongitudinal = 0.0f;
+		Wheel.TireFrictionLateral = 0.0f;
+		Wheel.WheelTorque = 0.0f;
+		Wheel.FrictionUtilization = 0.0f;
+		Wheel.LongitudinalImpulse = 0.0f;
+		Wheel.LateralImpulse = 0.0f;
+		Wheel.ImpulseWindow = 0.0f;
+		Wheel.bTireConstraintApplied = false;
+		if (Wheel.TireConstraintIndex == INDEX_NONE) { return; }
+
+		const FCirrovaWheelFrictionResults Results =
+			Container.ConsumeFrameResults(Wheel.TireConstraintIndex);
+		if (Results.FrameDeltaTime <= KINDA_SMALL_NUMBER) { return; }
+
+		// 冲量 kg·cm/s → N·s（÷100）。
+		Wheel.LongitudinalImpulse = Results.LongitudinalImpulse * CentimeterToMeter;
+		Wheel.LateralImpulse = Results.LateralImpulse * CentimeterToMeter;
+		Wheel.ImpulseWindow = Results.FrameDeltaTime;
+
+		const float LongitudinalForce =
+			Results.LongitudinalImpulse / Results.FrameDeltaTime / MeterToCentimeter;
+		const float LateralForce =
+			Results.LateralImpulse / Results.FrameDeltaTime / MeterToCentimeter;
+		if (!FMath::IsFinite(LongitudinalForce) || !FMath::IsFinite(LateralForce)) { return; }
+
+		Wheel.TireForces.Longitudinal = LongitudinalForce;
+		Wheel.TireForces.Lateral = LateralForce;
+		Wheel.TireForces.WheelTorque = -LongitudinalForce * Wheel.Radius;
+
+		Wheel.TireFrictionLongitudinal = LongitudinalForce;
+		Wheel.TireFrictionLateral = LateralForce;
+		Wheel.WheelTorque = Wheel.TireForces.WheelTorque;
+		Wheel.FrictionForceLimit = Wheel.PendingFrictionForceLimit;
+		Wheel.FrictionUtilization = Wheel.FrictionForceLimit > KINDA_SMALL_NUMBER
+			? FMath::Sqrt(FMath::Square(LongitudinalForce) + FMath::Square(LateralForce))
+				/ Wheel.FrictionForceLimit
+			: 0.0f;
+	}
+
+	/** 写入本物理步的轮胎约束输入；滚动阻力作为外部力累积。 */
+	void WriteTireConstraint(
+		FCirrovaWheelFrictionConstraints& Container,
+		const FCirrovaVehicleRuntime& Runtime,
+		FCirrovaWheelRuntime& Wheel
+	)
+	{
+		FCirrovaWheelFrictionSettings Settings;
+		Wheel.RollingResistance = 0.0f;
+		Wheel.TireForce = FVector::ZeroVector;
+		Wheel.SurfaceSpeed = Wheel.Omega * Wheel.Radius;
+		Wheel.SlipRatio = 0.0f;
+		Wheel.bTireConstraintApplied = false;
+		Wheel.PendingFrictionForceLimit = 0.0f;
+		Wheel.LateralForceLimit = 0.0f;
+
+		if (Wheel.bInContact && Wheel.NormalLoad > 0.0f
+			&& Wheel.TireConstraintIndex != INDEX_NONE
+			&& IsFiniteVector(Wheel.ContactPoint)
+			&& IsFiniteVector(Wheel.LongitudinalAxis)
+			&& IsFiniteVector(Wheel.LateralAxis)
+			&& IsFiniteVector(Wheel.GroundVelocity))
+		{
+			const float LongitudinalSpeed = Wheel.ContactLongitudinalSpeed;
+			const float LateralSpeed = Wheel.ContactLateralSpeed;
+			const float SlipAngle = Wheel.SlipAngleRad;
+			Wheel.SlipRatio = (Wheel.SurfaceSpeed - LongitudinalSpeed) / FMath::Max(
+				FMath::Abs(LongitudinalSpeed),
+				SlipReferenceSpeed
+			);
+
+			const FLiminalTireModel Model{
+				Runtime.TireFriction,
+				Runtime.TireLateralStiffness,
+				Runtime.TireLoadSensitivity,
+				Runtime.TireReferenceLoad,
+				Runtime.TireRollingResistance,
+			};
+			const FLiminalTireConstraint Constraint = liminal_tire_constraint(
+				&Model,
+				LongitudinalSpeed,
+				SlipAngle,
+				LateralSpeed,
+				Wheel.NormalLoad
+			);
+
+			const float WheelSurfaceSpeed = Wheel.Omega * Wheel.Radius * MeterToCentimeter;
+			const bool bValid = FMath::IsFinite(Constraint.FrictionForce)
+				&& FMath::IsFinite(Constraint.LateralForce)
+				&& FMath::IsFinite(Constraint.RollingForce)
+				&& FMath::IsFinite(WheelSurfaceSpeed)
+				&& Constraint.FrictionForce > 0.0f;
+
+			if (bValid)
+			{
+				Settings.bEnabled = true;
+				Settings.ContactPoint = ToChaosVector(Wheel.ContactPoint);
+				Settings.LongitudinalAxis = ToChaosVector(Wheel.LongitudinalAxis);
+				Settings.LateralAxis = ToChaosVector(Wheel.LateralAxis);
+				Settings.GroundVelocity = ToChaosVector(Wheel.GroundVelocity);
+				Settings.WheelSurfaceSpeed = WheelSurfaceSpeed;
+				Settings.FrictionForceLimit = Constraint.FrictionForce * MeterToCentimeter;
+				Settings.LateralForceLimit = FMath::Abs(Constraint.LateralForce)
+					* MeterToCentimeter;
+
+				Wheel.PendingFrictionForceLimit = FMath::Max(Constraint.FrictionForce, 0.0f);
+				Wheel.LateralForceLimit = FMath::Abs(Constraint.LateralForce);
+				Wheel.RollingResistance = Constraint.RollingForce;
+				Wheel.TireForce = Wheel.LongitudinalAxis * Wheel.RollingResistance;
+				Wheel.bTireConstraintApplied = true;
+			}
+		}
+
+		Container.SetSettings(Wheel.TireConstraintIndex, Settings);
+	}
+
+	/** 推进单载具：接触解、悬挂载荷、轮胎耦合与力施加。 */
 	void SimulateVehicle(
-		const UWorld* World,
 		float DeltaTime,
 		const FCirrovaVehicleAsyncInput& Input,
+		FCirrovaWheelFrictionConstraints* WheelConstraints,
 		FCirrovaVehicleRuntime& Runtime,
 		FPBDRigidParticleHandle& Particle,
 		FCirrovaVehicleOutput& Output
@@ -305,11 +589,13 @@ namespace
 		const FVector LinearVelocity(ParticleLinearVelocity);
 		const FVector AngularVelocity(ParticleAngularVelocity);
 
-		const FVec3 CenterOfMassChaos = FParticleUtilitiesGT::GetCoMWorldPosition(&Particle);
+		const FVec3 CenterOfMassChaos =
+			Particle.GetX() + Particle.GetR().RotateVector(Particle.CenterOfMass());
 		const FVector CenterOfMass(CenterOfMassChaos);
 
+		// 输入约定正值为左转；UE 绕 +Z 的正向旋转为右转，故取反。
 		const float SteeringAngle =
-			FMath::Clamp(Input.Steering, -1.0f, 1.0f) * Runtime.MaxSteeringAngle;
+			-FMath::Clamp(Input.Steering, -1.0f, 1.0f) * Runtime.MaxSteeringAngle;
 		liminal_vehicle_write_signal(
 			Runtime.Handle,
 			Runtime.ThrottleSignalPort,
@@ -327,44 +613,39 @@ namespace
 			FMath::Clamp(Input.Brake, 0.0f, 1.0f)
 		);
 
-		TArray<FConstPhysicsObjectHandle> BlockingObjects;
-		GatherBlockingObjects(
-			World,
-			Input.TraceParams,
-			Runtime.WheelTraceChannel,
-			Runtime.Wheels,
-			ChassisToWorld,
-			BlockingObjects
-		);
-
 		FReadPhysicsObjectInterface_Internal ReadInterface = FPhysicsObjectInternalInterface::GetRead();
 		FPhysicsObjectCollisionInterface_Internal CollisionInterface{ReadInterface};
 		FPhysicsSolver* Solver = Input.Proxy
 			                         ? Input.Proxy->GetSolver<FPhysicsSolver>()
 			                         : nullptr;
+
 		for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
 		{
-			Wheel.AccumulatedForce = FVector::ZeroVector;
+			Wheel.SupportForce = FVector::ZeroVector;
+			Wheel.TireForce = FVector::ZeroVector;
 			SolveContact(
 				CollisionInterface,
-				BlockingObjects,
+				Input.BlockingObjects,
 				&Particle,
 				ChassisToWorld,
 				ChassisUp,
 				LinearVelocity,
 				AngularVelocity,
 				CenterOfMass,
-				DeltaTime,
 				SteeringAngle,
 				Wheel
 			);
+		}
 
-			// 原生悬挂：目标点为轮心（地面接触点沿底盘上方向偏移半径），
-			// 与约束的 Distance = 弹簧长度 语义对齐。
-			if (Wheel.bUseSuspensionConstraint && Wheel.SuspensionConstraint && Solver)
+		// 原生悬挂约束：以轮心为目标点、接触法线为法向，接地状态决定启用。
+		if (Solver)
+		{
+			for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
 			{
+				if (!Wheel.bUseSuspensionConstraint || !Wheel.SuspensionConstraint) { continue; }
+
 				const FVector TargetPosition = Wheel.bInContact
-					                               ? Wheel.ContactPoint + ChassisUp * (Wheel.Radius * MeterToCentimeter)
+					                               ? Wheel.WheelCenter
 					                               : Wheel.ContactPoint;
 				Solver->SetSuspensionTarget(
 					Wheel.SuspensionConstraint,
@@ -376,45 +657,156 @@ namespace
 			}
 		}
 
-		// 防倾杆成对求解后，重算各轮用于摩擦圆的总法向载荷。
+		// 原生悬挂约束：读回求解长度并保持阻尼项与求解器步长同步。
+		float SolverDeltaTime = Solver ? static_cast<float>(Solver->GetAsyncDeltaTime()) : DeltaTime;
+		if (SolverDeltaTime <= KINDA_SMALL_NUMBER) { SolverDeltaTime = DeltaTime; }
+		SolverDeltaTime = FMath::Clamp(SolverDeltaTime, 1.0f / 1000.0f, 0.1f);
+		if (Solver) { RefreshSuspensionConstraints(Runtime, *Solver, SolverDeltaTime); }
+
+		int32 GroundedWheelCount = 0;
+		for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
+		{
+			ResolveSuspensionLoad(Wheel, DeltaTime);
+			if (Wheel.bInContact) { ++GroundedWheelCount; }
+		}
+
 		SolveAntiRollBars(Runtime);
 		for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
 		{
-			Wheel.NormalLoad = FMath::Max(Wheel.SuspensionForce + Wheel.AntiRollForce, 0.0f);
+			ResolveWheelSupport(ChassisToWorld, ChassisUp, Wheel);
 		}
 
-		const int32 Substeps = FMath::Clamp(
-			FMath::CeilToInt(DeltaTime / MaxSubstepDeltaTime),
-			1,
-			MaxSubstepsPerTick
-		);
-		const float SubDeltaTime = DeltaTime / static_cast<float>(Substeps);
-		for (int32 Step = 0; Step < Substeps; ++Step)
+		const bool bConstraintCoupling =
+			Runtime.bUseTireConstraint && WheelConstraints != nullptr && Solver != nullptr;
+		int32 AppliedSubsteps = 1;
+
+		if (bConstraintCoupling)
 		{
-			for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels) { SolveTire(Runtime, Wheel, SubDeltaTime); }
-			liminal_vehicle_step(Runtime.Handle, SubDeltaTime);
+			FCirrovaWheelFrictionConstraints& Container = *WheelConstraints;
+			BindTireConstraints(Container, Runtime, Input.VehicleId, &Particle);
+
+			// 1) 上一物理帧的轮胎冲量换算为轮端反作用力矩。
+			for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
+			{
+				ReadTireConstraint(Container, Wheel);
+				if (Wheel.TireConstraintIndex != INDEX_NONE)
+				{
+					liminal_vehicle_write_torque(
+						Runtime.Handle,
+						Wheel.ShaftPort,
+						Wheel.TireForces.WheelTorque
+					);
+				}
+			}
+
+			// 2) 动力流按物理步单步推进；车轮不再需要内部子步。
+			liminal_vehicle_step(Runtime.Handle, DeltaTime);
 			for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
 			{
 				liminal_vehicle_read_omega(Runtime.Handle, Wheel.ShaftPort, &Wheel.Omega);
+
+				// 轮端等效惯量随转速连通组变化，逐步刷新供遥测与后续回注使用。
+				float EffectiveInertia = 0.0f;
+				if (liminal_vehicle_effective_inertia(
+						Runtime.Handle,
+						Wheel.ShaftPort,
+						&EffectiveInertia
+					) == ELiminalStatus::Ok
+					&& EffectiveInertia > 0.0f) { Wheel.EffectiveInertia = EffectiveInertia; }
+				else { Wheel.EffectiveInertia = Runtime.WheelInertia; }
+
+				// 3) 以更新后的轮速写入本步约束输入。
+				WriteTireConstraint(Container, Runtime, Wheel);
+			}
+
+			Output.bSubstepBudgetExceeded = false;
+		}
+		else
+		{
+			// 约束不可用的帧：丢弃未消费的冲量，避免模式恢复后出现过期的回注力矩。
+			if (WheelConstraints)
+			{
+				for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
+				{
+					if (Wheel.TireConstraintIndex != INDEX_NONE)
+					{
+						WheelConstraints->ConsumeFrameResults(Wheel.TireConstraintIndex);
+					}
+				}
+			}
+
+			// 外力回退：轮胎力与轮速显式交替，子步化压回稳定区。
+			AppliedSubsteps = FMath::Clamp(
+				FMath::CeilToInt(DeltaTime / MaxSubstepDeltaTime),
+				1,
+				MaxSubstepsPerTick
+			);
+			Output.bSubstepBudgetExceeded =
+				DeltaTime > MaxSubstepDeltaTime * static_cast<float>(MaxSubstepsPerTick);
+			const float SubDeltaTime = DeltaTime / static_cast<float>(AppliedSubsteps);
+			for (int32 Step = 0; Step < AppliedSubsteps; ++Step)
+			{
+				for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
+				{
+					SolveTire(Runtime, Wheel, SubDeltaTime, GroundedWheelCount);
+				}
+				liminal_vehicle_step(Runtime.Handle, SubDeltaTime);
+				for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
+				{
+					liminal_vehicle_read_omega(Runtime.Handle, Wheel.ShaftPort, &Wheel.Omega);
+					float EffectiveInertia = 0.0f;
+					if (liminal_vehicle_effective_inertia(
+							Runtime.Handle,
+							Wheel.ShaftPort,
+							&EffectiveInertia
+						) == ELiminalStatus::Ok
+						&& EffectiveInertia > 0.0f) { Wheel.EffectiveInertia = EffectiveInertia; }
+					else { Wheel.EffectiveInertia = Runtime.WheelInertia; }
+				}
 			}
 		}
 
-		// 力在求解器子步内直接写入粒子累加器；每个内部子步的合力取平均后施加一次。
+		Runtime.AppliedSubsteps = AppliedSubsteps;
+		Runtime.SolverDeltaTime = SolverDeltaTime;
+		Runtime.bTireConstraintCoupling = bConstraintCoupling;
+
+		// 支撑力为整步常量；轮胎力在回退模式下为内部子步平均，约束模式下只剩滚动阻力。
+		const float TireForceScale = bConstraintCoupling
+			                             ? 1.0f
+			                             : 1.0f / static_cast<float>(AppliedSubsteps);
 		for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
 		{
-			if (!Wheel.bInContact || Wheel.AccumulatedForce.IsNearlyZero()) { continue; }
+			auto ApplyForceAtPosition = [&Particle, &CenterOfMassChaos](
+				const FVector& Force,
+				const FVector& Position
+			)
+			{
+				if (Force.IsNearlyZero()) { return; }
+				const FVec3 ForceChaos(Force);
+				const FVec3 TorqueChaos = FVec3::CrossProduct(
+					FVec3(Position) - CenterOfMassChaos,
+					ForceChaos
+				);
+				Particle.AddForce(ForceChaos);
+				Particle.AddTorque(TorqueChaos);
+			};
 
-			const FVector Force =
-				Wheel.AccumulatedForce * (MeterToCentimeter / static_cast<float>(Substeps));
-			FParticleUtilitiesGT::AddForceAtPositionWorld(
-				&Particle,
-				FVec3(Force),
-				FVec3(Wheel.ContactPoint)
+			ApplyForceAtPosition(
+				Wheel.SupportForce * MeterToCentimeter,
+				Wheel.WheelCenter
 			);
-			Wheel.AccumulatedForce = FVector::ZeroVector;
+			ApplyForceAtPosition(
+				Wheel.TireForce * (MeterToCentimeter * TireForceScale),
+				Wheel.ContactPoint
+			);
+			Wheel.SupportForce = FVector::ZeroVector;
+			Wheel.TireForce = FVector::ZeroVector;
 		}
 
 		Output.bGrounded = false;
+		Output.bTireConstraintCoupling = Runtime.bTireConstraintCoupling;
+		Output.AppliedSubsteps = Runtime.AppliedSubsteps;
+		Output.SolverDeltaTime = Runtime.SolverDeltaTime;
 		Output.Wheels.SetNum(Runtime.Wheels.Num());
 		for (int32 Index = 0; Index < Runtime.Wheels.Num(); ++Index)
 		{
@@ -422,15 +814,40 @@ namespace
 			FCirrovaWheelOutput& WheelOutput = Output.Wheels[Index];
 			WheelOutput.bInContact = Wheel.bInContact;
 			WheelOutput.Omega = Wheel.Omega;
+			WheelOutput.SurfaceSpeed = Wheel.SurfaceSpeed;
+			WheelOutput.EffectiveInertia = Wheel.EffectiveInertia;
 			WheelOutput.SuspensionLength = Wheel.CurrentLength;
 			WheelOutput.SuspensionForce = Wheel.SuspensionForce;
 			WheelOutput.AntiRollForce = Wheel.AntiRollForce;
 			WheelOutput.NormalLoad = Wheel.NormalLoad;
-			WheelOutput.TireForces = Wheel.TireForces;
+			WheelOutput.Compression = Wheel.Compression;
+			WheelOutput.CompressionVelocity = Wheel.CompressionVelocity;
+			WheelOutput.bCompressionVelocityClamped = Wheel.bCompressionVelocityClamped;
+			WheelOutput.bNativeSuspensionActive = Wheel.bUseSuspensionConstraint;
+			WheelOutput.bUsingConstraintLength = Wheel.bUsingConstraintLength;
+			WheelOutput.SuspensionConstraintLength = Wheel.ConstraintLength;
+			WheelOutput.TireLongitudinalForce = Wheel.TireFrictionLongitudinal;
+			WheelOutput.TireLateralForce = Wheel.TireFrictionLateral;
+			WheelOutput.WheelTorque = Wheel.WheelTorque;
+			WheelOutput.RollingResistance = Wheel.RollingResistance;
+			WheelOutput.FrictionForceLimit = Wheel.FrictionForceLimit;
+			WheelOutput.LateralForceLimit = Wheel.LateralForceLimit;
+			WheelOutput.FrictionUtilization = Wheel.FrictionUtilization;
+			WheelOutput.bTireConstraintApplied = Wheel.bTireConstraintApplied;
+			WheelOutput.LongitudinalImpulse = Wheel.LongitudinalImpulse;
+			WheelOutput.LateralImpulse = Wheel.LateralImpulse;
+			WheelOutput.ImpulseWindow = Wheel.ImpulseWindow;
+			WheelOutput.ContactLongitudinalSpeed = Wheel.ContactLongitudinalSpeed;
+			WheelOutput.ContactLateralSpeed = Wheel.ContactLateralSpeed;
+			WheelOutput.SlipRatio = Wheel.SlipRatio;
+			WheelOutput.SlipAngleDegrees = FMath::RadiansToDegrees(Wheel.SlipAngleRad);
+			WheelOutput.SuspensionAxis = Wheel.SuspensionAxis;
 			WheelOutput.ContactPoint = Wheel.ContactPoint;
 			WheelOutput.ContactNormal = Wheel.ContactNormal;
 			WheelOutput.LongitudinalAxis = Wheel.LongitudinalAxis;
 			WheelOutput.LateralAxis = Wheel.LateralAxis;
+			WheelOutput.ContactVelocity = Wheel.ContactVelocity;
+			WheelOutput.GroundVelocity = Wheel.GroundVelocity;
 			Output.bGrounded |= Wheel.bInContact;
 		}
 
@@ -444,8 +861,7 @@ namespace
 void FCirrovaAsyncCallback::OnPreSimulate_Internal()
 {
 	const FCirrovaAsyncInput* Input = GetConsumerInput_Internal();
-	UWorld* World = Input ? Input->World.Get() : nullptr;
-	if (!Input || !World) { return; }
+	if (!Input) { return; }
 
 	const float DeltaTime = GetDeltaTime_Internal();
 	if (DeltaTime <= 0.0f) { return; }
@@ -454,6 +870,9 @@ void FCirrovaAsyncCallback::OnPreSimulate_Internal()
 	Output.Reset();
 	Output.Vehicles.Reserve(Input->Vehicles.Num());
 
+	FCirrovaWheelFrictionConstraints* WheelConstraints = Input->WheelConstraints;
+	if (WheelConstraints) { WheelConstraints->BeginFrame(); }
+
 	for (const FCirrovaVehicleAsyncInput& VehicleInput : Input->Vehicles)
 	{
 		FCirrovaVehicleRuntime* Runtime = VehicleInput.Runtime;
@@ -461,6 +880,8 @@ void FCirrovaAsyncCallback::OnPreSimulate_Internal()
 
 		FPBDRigidParticleHandle* Particle = ResolveParticle(VehicleInput.Proxy);
 		if (!Particle) { continue; }
+
+		if (WheelConstraints) { WheelConstraints->MarkOwnerActive(VehicleInput.VehicleId); }
 
 		FCirrovaVehicleOutput& VehicleOutput = Output.Vehicles.AddDefaulted_GetRef();
 		VehicleOutput.VehicleId = VehicleInput.VehicleId;
@@ -473,14 +894,17 @@ void FCirrovaAsyncCallback::OnPreSimulate_Internal()
 		if (bHasDriverInput && Particle->IsSleeping()) { Particle->SetSleeping(false); }
 
 		SimulateVehicle(
-			World,
 			DeltaTime,
 			VehicleInput,
+			WheelConstraints,
 			*Runtime,
 			*Particle,
 			VehicleOutput
 		);
 	}
+
+	// 未在本步出现的载具所拥有的约束槽位在此释放。
+	if (WheelConstraints) { WheelConstraints->EndFrame(); }
 }
 
 void FCirrovaAsyncCallback::OnContactModification_Internal(FCollisionContactModifier& Modifier)
