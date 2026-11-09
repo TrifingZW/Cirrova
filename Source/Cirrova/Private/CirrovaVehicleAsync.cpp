@@ -255,10 +255,14 @@ namespace
 			const int32 Index = Handle->GetConstraintIndex();
 			if (Index == INDEX_NONE || Index >= Container.NumConstraints()) { continue; }
 
-			// 弹簧在每次位置迭代中完整施加，按迭代数折算，保持有效刚度/阻尼与 liminal 一致。
+			// 弹簧在每次位置迭代中完整施加，按迭代数折算；刚度按行程曲线与渐进限位刷新，
+			// 阻尼按压缩/回弹方向选择，保持有效刚度/阻尼与适配层模型一致。
+			const float Compression = FMath::Max(Wheel.Compression, 0.0f);
+			const float EffectiveStiffness = EvaluateSuspensionStiffness(Wheel, Compression);
+			const float EffectiveDamping = SelectSuspensionDamping(Wheel, Wheel.CompressionVelocity);
 			FPBDSuspensionSettings Settings = Container.GetSettings(Index);
-			Settings.SpringStiffness = FMath::Max(Wheel.SuspensionStiffness, 0.0f) * IterationScale;
-			Settings.SpringDamping = FMath::Max(Wheel.SuspensionDamping, 0.0f)
+			Settings.SpringStiffness = EffectiveStiffness * IterationScale;
+			Settings.SpringDamping = FMath::Max(EffectiveDamping, 0.0f)
 				* SolverDeltaTime * IterationScale;
 			Container.SetSettings(Index, Settings);
 
@@ -331,21 +335,33 @@ namespace
 		if (bUseConstraintLength && Wheel.bConstraintPushOutValid && DeltaTime > KINDA_SMALL_NUMBER)
 		{
 			// NetPushOut 是位置求解累积的 kg·cm 修正量；等价法向力 = 修正量 / dt²，换算为 N 乘以 0.01。
-			// 该值包含弹簧、阻尼与硬限位，且反映刚体多约束耦合后的真实支撑力。
+			// 该值包含弹簧、阻尼、行程曲线与硬限位；预载由适配层显式叠加。
 			const FVector PushOut = Wheel.ConstraintPushOut + Wheel.ConstraintHardStopPushOut;
 			const float NormalPushOut = FVector::DotProduct(PushOut, Wheel.ContactNormal);
-			Force = NormalPushOut / (DeltaTime * DeltaTime) * 0.01f;
+			Force = NormalPushOut / (DeltaTime * DeltaTime) * 0.01f + Wheel.SuspensionPreload;
 			if (!FMath::IsFinite(Force) || Force < 0.0f) { Force = 0.0f; }
 		}
 		else if (Wheel.bInContact)
 		{
+			// 外力回退：与原生约束相同的曲线、渐进限位、分向阻尼与预载。
+			const float StiffnessScale = EvaluateSuspensionStiffnessScale(
+				Wheel.SuspensionCurve,
+				Compression
+			);
+			const float EffectiveStiffness = Wheel.SuspensionStiffness * StiffnessScale;
+			const float EffectiveDamping = SelectSuspensionDamping(Wheel, CompressionVelocity);
 			Force = liminal_suspension_force(
-				Wheel.SuspensionStiffness,
-				Wheel.SuspensionDamping,
+				EffectiveStiffness,
+				EffectiveDamping,
 				Compression,
 				CompressionVelocity
 			);
-			if (!FMath::IsFinite(Force)) { Force = 0.0f; }
+			if (Wheel.BumpStopStiffness > 0.0f && Compression > Wheel.BumpStopStart)
+			{
+				Force += Wheel.BumpStopStiffness * (Compression - Wheel.BumpStopStart);
+			}
+			Force += Wheel.SuspensionPreload;
+			if (!FMath::IsFinite(Force) || Force < 0.0f) { Force = 0.0f; }
 		}
 
 		Wheel.SuspensionForce = Force;
@@ -399,10 +415,12 @@ namespace
 			0.0f
 		);
 
-		// 原生悬挂约束已承担弹簧力；地面代理不被引擎接受时改用射线弹簧力。
+		// 原生悬挂约束已承担弹簧/阻尼/曲线/渐进限位；预载由适配层沿悬挂轴外部施加。
 		const bool bConstraintSupportsLoad =
 			Wheel.bUseSuspensionConstraint && Wheel.bGroundSupportsConstraint;
-		const float AppliedSuspension = bConstraintSupportsLoad ? 0.0f : Wheel.SuspensionForce;
+		const float AppliedSuspension = bConstraintSupportsLoad
+			? Wheel.SuspensionPreload
+			: Wheel.SuspensionForce;
 		Wheel.SupportForce = Axis * (AppliedSuspension + Wheel.AntiRollForce);
 	}
 

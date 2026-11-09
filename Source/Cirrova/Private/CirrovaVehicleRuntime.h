@@ -12,6 +12,13 @@ namespace Chaos
 	class FSuspensionConstraint;
 }
 
+/** 运行态悬挂刚度曲线采样点。 */
+struct FCirrovaSuspensionCurveRuntimePoint
+{
+	float Compression = 0.0f;
+	float StiffnessScale = 1.0f;
+};
+
 /** 单轮物理运行态，仅在物理线程读写。 */
 struct FCirrovaWheelRuntime
 {
@@ -37,6 +44,12 @@ struct FCirrovaWheelRuntime
 	// 悬挂参数（SI）。
 	float SuspensionStiffness = 0.0f;
 	float SuspensionDamping = 0.0f;
+	float CompressionDamping = 0.0f;
+	float ReboundDamping = 0.0f;
+	float SuspensionPreload = 0.0f;
+	float BumpStopStiffness = 0.0f;
+	float BumpStopStart = 0.0f;
+	TArray<FCirrovaSuspensionCurveRuntimePoint> SuspensionCurve;
 	float RestLength = 0.0f;
 	float MinLength = 0.0f;
 	float MaxLength = 0.0f;
@@ -159,6 +172,55 @@ struct FCirrovaWheelRuntime
 	// 地面代理是否可被原生悬挂约束使用（引擎只接受单粒子代理）。
 	bool bGroundSupportsConstraint = false;
 };
+
+/** 按压缩量线性插值刚度倍率；曲线为空时返回 1。 */
+inline float EvaluateSuspensionStiffnessScale(
+	const TArray<FCirrovaSuspensionCurveRuntimePoint>& Curve,
+	const float Compression
+)
+{
+	if (Curve.IsEmpty()) { return 1.0f; }
+	if (Compression <= Curve[0].Compression) { return Curve[0].StiffnessScale; }
+
+	for (int32 Index = 1; Index < Curve.Num(); ++Index)
+	{
+		if (Compression > Curve[Index].Compression) { continue; }
+
+		const float Span = Curve[Index].Compression - Curve[Index - 1].Compression;
+		const float Alpha = Span > KINDA_SMALL_NUMBER
+			? (Compression - Curve[Index - 1].Compression) / Span
+			: 0.0f;
+		return FMath::Lerp(Curve[Index - 1].StiffnessScale, Curve[Index].StiffnessScale, Alpha);
+	}
+	return Curve.Last().StiffnessScale;
+}
+
+/** 当前压缩量下的弹簧刚度：基础刚度 × 曲线倍率 + 渐进限位刚度。 */
+inline float EvaluateSuspensionStiffness(
+	const FCirrovaWheelRuntime& Wheel,
+	const float Compression
+)
+{
+	float Stiffness = Wheel.SuspensionStiffness
+		* EvaluateSuspensionStiffnessScale(Wheel.SuspensionCurve, Compression);
+	if (Wheel.BumpStopStiffness > 0.0f && Compression > Wheel.BumpStopStart)
+	{
+		Stiffness += Wheel.BumpStopStiffness;
+	}
+	return FMath::Max(Stiffness, 0.0f);
+}
+
+/** 按压缩速度方向选择压缩或回弹阻尼；0 时退回基础阻尼。 */
+inline float SelectSuspensionDamping(
+	const FCirrovaWheelRuntime& Wheel,
+	const float CompressionVelocity
+)
+{
+	const float Selected = CompressionVelocity >= 0.0f
+		? Wheel.CompressionDamping
+		: Wheel.ReboundDamping;
+	return Selected > 0.0f ? Selected : Wheel.SuspensionDamping;
+}
 
 /** 防倾杆运行态：成对车轮的附加法向力，物理线程读写。 */
 struct FCirrovaAntiRollBarRuntime

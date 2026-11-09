@@ -215,7 +215,15 @@ void UCirrovaVehicleComponent::BeginPlay()
 		const float NaturalFrequency = FMath::Sqrt(
 			FMath::Max(Config.SuspensionStiffness / QuarterMass, 0.0f)
 		) / (2.0f * PI);
-		const float DampingRatio = Config.SuspensionDamping / (
+		const float DiagnosticCompressionDamping = Config.CompressionDamping > 0.0f
+			? Config.CompressionDamping
+			: Config.SuspensionDamping;
+		const float DiagnosticReboundDamping = Config.ReboundDamping > 0.0f
+			? Config.ReboundDamping
+			: Config.SuspensionDamping;
+		const float DiagnosticDamping = 0.5f
+			* (DiagnosticCompressionDamping + DiagnosticReboundDamping);
+		const float DampingRatio = DiagnosticDamping / (
 			2.0f * FMath::Sqrt(
 				FMath::Max(Config.SuspensionStiffness * QuarterMass, KINDA_SMALL_NUMBER)
 			)
@@ -643,19 +651,21 @@ void UCirrovaVehicleComponent::InitializeSuspensionConstraints(FCirrovaVehicleRu
 
 		Constraint->SetHardstopStiffness(1.0f);
 		Constraint->SetHardstopVelocityCompensation(1.0f);
+		// UE 5.8 的悬挂约束不消费 SpringPreload；预载由适配层沿悬挂轴显式施加。
 		Constraint->SetSpringPreload(0.0f);
-		// 弹簧在位置求解的每次迭代中都会完整施加一次，按实际迭代数折算设定值，
-		// 使有效刚度/阻尼等于 liminal 的 k / c（官方 ChaosVehicles 固定取 1/4）。
+		// 弹簧在位置求解的每次迭代中都会完整施加一次，按实际迭代数折算设定值。
+		// 初始刚度按零压缩曲线，阻尼取压缩侧；首个物理步后由 Refresh 逐轮刷新。
 		auto* Evolution = Solver->GetEvolution();
 		const int32 PositionIterations = Evolution
 			? FMath::Max(Evolution->GetNumPositionIterations(), 1)
 			: 4;
 		const float IterationScale = 1.0f / static_cast<float>(PositionIterations);
 		Constraint->SetSpringStiffness(
-			FMath::Max(Wheel.SuspensionStiffness, 0.0f) * IterationScale
+			EvaluateSuspensionStiffness(Wheel, Wheel.Compression) * IterationScale
 		);
 		Constraint->SetSpringDamping(
-			FMath::Max(Wheel.SuspensionDamping, 0.0f) * SolverDeltaTime * IterationScale
+			FMath::Max(SelectSuspensionDamping(Wheel, 0.0f), 0.0f)
+				* SolverDeltaTime * IterationScale
 		);
 		// Chaos 悬挂约束的行程是相对自由长度的有符号量：压缩为负、伸展为正。
 		// liminal 弹簧在自由长度以上不产生伸展力，因此上限取 0（自由长度），
@@ -972,6 +982,23 @@ bool UCirrovaVehicleComponent::ValidateConfiguration(FString& OutError) const
 			|| !FMath::IsFinite(Config.SuspensionDamping) || Config.SuspensionDamping < 0.0f)
 		{
 			return Fail(FString::Printf(TEXT("车轮 %d 的悬挂刚度必须为正、阻尼必须为非负有限值"), Index));
+		}
+		if (!FMath::IsFinite(Config.CompressionDamping) || Config.CompressionDamping < 0.0f
+			|| !FMath::IsFinite(Config.ReboundDamping) || Config.ReboundDamping < 0.0f
+			|| !FMath::IsFinite(Config.SuspensionPreload) || Config.SuspensionPreload < 0.0f
+			|| !FMath::IsFinite(Config.BumpStopStiffness) || Config.BumpStopStiffness < 0.0f
+			|| !FMath::IsFinite(Config.BumpStopStart) || Config.BumpStopStart < 0.0f)
+		{
+			return Fail(FString::Printf(TEXT("车轮 %d 的压缩/回弹阻尼、预载或渐进限位参数无效"), Index));
+		}
+		for (int32 PointIndex = 0; PointIndex < Config.SuspensionCurve.Num(); ++PointIndex)
+		{
+			const FCirrovaSuspensionCurvePoint& Point = Config.SuspensionCurve[PointIndex];
+			if (!FMath::IsFinite(Point.Compression) || Point.Compression < 0.0f
+				|| !FMath::IsFinite(Point.StiffnessScale) || Point.StiffnessScale < 0.0f)
+			{
+				return Fail(FString::Printf(TEXT("车轮 %d 的悬挂刚度曲线采样点 %d 无效"), Index, PointIndex));
+			}
 		}
 		if (!FMath::IsFinite(Config.SuspensionRestLength) || !FMath::IsFinite(Config.SuspensionMinLength)
 			|| !FMath::IsFinite(Config.SuspensionMaxLength)
@@ -1418,6 +1445,28 @@ bool UCirrovaVehicleComponent::ReadSpatialLinks(
 			}
 			Wheel.SuspensionStiffness = Link.Joint.Stiffness;
 			Wheel.SuspensionDamping = Link.Joint.Damping;
+
+			const FCirrovaWheelConfig& Config = WheelConfigs[WheelIndex];
+			Wheel.CompressionDamping = Config.CompressionDamping;
+			Wheel.ReboundDamping = Config.ReboundDamping;
+			Wheel.SuspensionPreload = FMath::Max(Config.SuspensionPreload, 0.0f);
+			Wheel.BumpStopStiffness = FMath::Max(Config.BumpStopStiffness, 0.0f);
+			Wheel.BumpStopStart = FMath::Max(Config.BumpStopStart, 0.0f);
+			Wheel.SuspensionCurve.Reset(Config.SuspensionCurve.Num());
+			for (const FCirrovaSuspensionCurvePoint& Point : Config.SuspensionCurve)
+			{
+				FCirrovaSuspensionCurveRuntimePoint RuntimePoint;
+				RuntimePoint.Compression = Point.Compression;
+				RuntimePoint.StiffnessScale = Point.StiffnessScale;
+				Wheel.SuspensionCurve.Add(RuntimePoint);
+			}
+			Wheel.SuspensionCurve.Sort(
+				[](const FCirrovaSuspensionCurveRuntimePoint& A, const FCirrovaSuspensionCurveRuntimePoint& B)
+				{
+					return A.Compression < B.Compression;
+				}
+			);
+
 			Wheel.RestLength = Link.Joint.RestLength;
 			Wheel.MinLength = Link.Joint.MinLength;
 			Wheel.MaxLength = Link.Joint.MaxLength;

@@ -367,6 +367,31 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnVehicleGroundedSignature, bool, b
 
 #pragma endregion
 
+/** 悬挂刚度曲线采样点：压缩量 (m) 与基础刚度倍率。 */
+USTRUCT(BlueprintType)
+struct FCirrovaSuspensionCurvePoint
+{
+	GENERATED_BODY()
+
+	// 压缩量（m）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|悬挂",
+		meta = (DisplayName = "压缩量 (m)")
+	)
+	float Compression = 0.0f;
+
+	// 基础刚度倍率；1 表示使用 SuspensionStiffness。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|悬挂",
+		meta = (DisplayName = "刚度倍率")
+	)
+	float StiffnessScale = 1.0f;
+};
+
 /** 单轮配置：装配位姿与悬挂参数（UE 坐标，单位厘米；悬挂参数为 SI）。 */
 USTRUCT(BlueprintType)
 struct FCirrovaWheelConfig
@@ -409,7 +434,7 @@ struct FCirrovaWheelConfig
 	)
 	float SuspensionStiffness = 35000.0f;
 
-	// 悬挂阻尼（N·s/m）。
+	// 悬挂阻尼（N·s/m）。压缩/回弹阻尼都为 0 时作为两者的回退值。
 	UPROPERTY(
 		EditAnywhere,
 		BlueprintReadOnly,
@@ -417,6 +442,60 @@ struct FCirrovaWheelConfig
 		meta = (DisplayName = "悬挂阻尼")
 	)
 	float SuspensionDamping = 3000.0f;
+
+	// 压缩行程阻尼（N·s/m）；0 时退回 SuspensionDamping。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|车轮",
+		meta = (DisplayName = "压缩阻尼")
+	)
+	float CompressionDamping = 2500.0f;
+
+	// 回弹行程阻尼（N·s/m）；0 时退回 SuspensionDamping。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|车轮",
+		meta = (DisplayName = "回弹阻尼")
+	)
+	float ReboundDamping = 4500.0f;
+
+	// 预载（N），由适配层沿悬挂轴显式施加；0 关闭。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|车轮",
+		meta = (DisplayName = "悬挂预载 (N)")
+	)
+	float SuspensionPreload = 0.0f;
+
+	// 渐进限位刚度（N/m）：压缩量超过 BumpStopStart 后额外增加的刚度；0 关闭。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|车轮",
+		meta = (DisplayName = "渐进限位刚度")
+	)
+	float BumpStopStiffness = 30000.0f;
+
+	// 渐进限位起始压缩量（m）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|车轮",
+		meta = (DisplayName = "渐进限位起始压缩量 (m)")
+	)
+	float BumpStopStart = 0.12f;
+
+	// 行程刚度倍率曲线；空则倍率恒为 1。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|车轮",
+		meta = (DisplayName = "悬挂刚度曲线")
+	)
+	TArray<FCirrovaSuspensionCurvePoint> SuspensionCurve{};
 
 	// 悬挂自由长度（m）。
 	UPROPERTY(
