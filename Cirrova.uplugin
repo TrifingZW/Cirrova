@@ -29,6 +29,11 @@
             "Name": "CirrovaEngine",
             "Type": "Runtime",
             "LoadingPhase": "Default"
+        },
+        {
+            "Name": "CirrovaTests",
+            "Type": "DeveloperTool",
+            "LoadingPhase": "Default"
         }
     ]
 }
