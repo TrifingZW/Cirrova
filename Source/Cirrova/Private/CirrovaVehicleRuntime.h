@@ -74,6 +74,9 @@ struct FCirrovaWheelRuntime
 	// 轮胎冲量模型使用的轮端等效转动惯量（kg·m²）。
 	float EffectiveInertia = 0.0f;
 
+	// 轮胎约束当前采用的轮端惯量消元项 R²/J（1/kg）；制动锁止或未启用时为 0。
+	float ConstraintWheelInverseMass = 0.0f;
+
 	// 轮心（世界坐标，cm）。
 	FVector WheelCenter = FVector::ZeroVector;
 
@@ -220,6 +223,7 @@ struct FCirrovaVehicleRuntime
 	float TireReferenceLoad = 0.0f;
 	float TireRollingResistance = 0.0f;
 	float WheelInertia = 0.0f;
+	float MaxBrakeTorque = 0.0f;
 
 	uint64 ThrottleSignalPort = 0;
 	uint64 SteeringSignalPort = 0;
@@ -249,6 +253,7 @@ struct FCirrovaWheelOutput
 	float Omega = 0.0f;
 	float SurfaceSpeed = 0.0f;
 	float EffectiveInertia = 0.0f;
+	float ConstraintWheelInverseMass = 0.0f;
 	float SuspensionLength = 0.0f;
 	float SuspensionForce = 0.0f;
 	float AntiRollForce = 0.0f;

@@ -706,6 +706,7 @@ void UCirrovaVehicleComponent::ConsumeAsyncOutput(const FCirrovaVehicleOutput& I
 		Target.Omega = Source.Omega;
 		Target.SurfaceSpeed = Source.SurfaceSpeed;
 		Target.EffectiveInertia = Source.EffectiveInertia;
+		Target.ConstraintWheelInverseMass = Source.ConstraintWheelInverseMass;
 		Target.SuspensionLength = Source.SuspensionLength;
 		Target.SuspensionForce = Source.SuspensionForce;
 		Target.AntiRollForce = Source.AntiRollForce;
@@ -1071,6 +1072,7 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 	Runtime.TireReferenceLoad = TireReferenceLoad;
 	Runtime.TireRollingResistance = TireRollingResistance;
 	Runtime.WheelInertia = WheelInertia;
+	Runtime.MaxBrakeTorque = MaxBrakeTorque;
 	Runtime.bUseSphereContactProbe = bUseSphereContactProbe;
 	Runtime.bAllowPhysicsSleep = bAllowPhysicsSleep;
 	Runtime.TireRelaxationLength = TireRelaxationLength;

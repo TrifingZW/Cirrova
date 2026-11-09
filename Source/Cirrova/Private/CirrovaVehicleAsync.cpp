@@ -551,7 +551,12 @@ namespace
 		Wheel.LongitudinalImpulse = 0.0f;
 		Wheel.LateralImpulse = 0.0f;
 		Wheel.ImpulseWindow = 0.0f;
+		Wheel.ConstraintWheelInverseMass = 0.0f;
 		if (Wheel.TireConstraintIndex == INDEX_NONE) { return; }
+
+		Wheel.ConstraintWheelInverseMass = Container.IsConstraintEnabled(Wheel.TireConstraintIndex)
+			? Container.GetWheelInverseMass(Wheel.TireConstraintIndex)
+			: 0.0f;
 
 		const FCirrovaWheelFrictionResults Results =
 			Container.ConsumeFrameResults(Wheel.TireConstraintIndex);
@@ -586,7 +591,8 @@ namespace
 	void WriteTireConstraint(
 		FCirrovaWheelFrictionConstraints& Container,
 		const FCirrovaVehicleRuntime& Runtime,
-		FCirrovaWheelRuntime& Wheel
+		FCirrovaWheelRuntime& Wheel,
+		float BrakeInput
 	)
 	{
 		FCirrovaWheelFrictionSettings Settings;
@@ -655,6 +661,17 @@ namespace
 				Settings.LateralAxis = ToChaosVector(Wheel.LateralAxis);
 				Settings.GroundVelocity = ToChaosVector(Wheel.GroundVelocity);
 				Settings.WheelSurfaceSpeed = WheelSurfaceSpeed;
+				Settings.WheelRadiusCm = Wheel.Radius * MeterToCentimeter;
+				const float EffectiveInertia = Wheel.EffectiveInertia > KINDA_SMALL_NUMBER
+					? Wheel.EffectiveInertia
+					: Runtime.WheelInertia;
+				Settings.WheelInertiaKgCm2 = FMath::Max(EffectiveInertia, 0.0f)
+					* MeterToCentimeter * MeterToCentimeter;
+				// 制动器扭矩覆盖轮胎扭矩上限时视为锁止；轮端自由度由一维域制动器约束，
+				// 纵向冲量按纯底盘求解，避免制动工况下把车轮当成自由轮而低估制动力。
+				const float BrakeTorqueCapacity = Runtime.MaxBrakeTorque
+					* FMath::Clamp(BrakeInput, 0.0f, 1.0f);
+				Settings.bWheelLocked = BrakeTorqueCapacity >= Constraint.FrictionForce * Wheel.Radius;
 				Settings.FrictionForceLimit = Constraint.FrictionForce * MeterToCentimeter;
 				Settings.LateralForceLimit = LateralBoundForce * MeterToCentimeter;
 
@@ -859,7 +876,7 @@ namespace
 			// 以本步开始时的轮速写入约束输入；冲量与轮端反作用在 PostSolve 收尾。
 			for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
 			{
-				WriteTireConstraint(Container, Runtime, Wheel);
+				WriteTireConstraint(Container, Runtime, Wheel, Input.Brake);
 			}
 
 			Runtime.bSubstepBudgetExceeded = false;
@@ -1016,6 +1033,7 @@ namespace
 			WheelOutput.Omega = Wheel.Omega;
 			WheelOutput.SurfaceSpeed = Wheel.SurfaceSpeed;
 			WheelOutput.EffectiveInertia = Wheel.EffectiveInertia;
+			WheelOutput.ConstraintWheelInverseMass = Wheel.ConstraintWheelInverseMass;
 			WheelOutput.SuspensionLength = Wheel.CurrentLength;
 			WheelOutput.SuspensionForce = Wheel.SuspensionForce;
 			WheelOutput.AntiRollForce = Wheel.AntiRollForce;

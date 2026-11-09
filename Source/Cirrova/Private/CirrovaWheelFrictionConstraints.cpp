@@ -38,7 +38,8 @@ namespace
 	 * 单轴冲量求解：把接触点沿轴的速度驱动到目标速度，冲量按累计值钳制。
 	 *
 	 * 目标速度来自本步约束设置，冲量界在 GatherInput 中按步长折算；累计值跨
-	 * 速度迭代保留，保证多迭代下的收敛与不越界。
+	 * 速度迭代保留，保证多迭代下的收敛与不越界。AdditionalInverseMass 为轮端
+	 * 自由度消元项 R²/J（1/kg），侧向约束传 0。
 	 */
 	void SolveAxis(
 		Chaos::FSolverBody& Body,
@@ -46,13 +47,16 @@ namespace
 		const Chaos::FSolverVec3& Axis,
 		Chaos::FSolverReal TargetSpeed,
 		Chaos::FSolverReal MaxImpulse,
-		Chaos::FSolverReal& Accumulated
+		Chaos::FSolverReal& Accumulated,
+		Chaos::FSolverReal AdditionalInverseMass = Chaos::FSolverReal(0)
 	)
 	{
 		const Chaos::FSolverVec3 Arm = ContactPoint - ToSolverVector(Body.CorrectedP());
 		const Chaos::FSolverVec3 ArmCrossAxis = Chaos::FSolverVec3::CrossProduct(Arm, Axis);
 		const Chaos::FSolverReal InverseMass =
-			Body.InvM() + Chaos::FSolverVec3::DotProduct(ArmCrossAxis, Body.InvI() * ArmCrossAxis);
+			Body.InvM()
+			+ Chaos::FSolverVec3::DotProduct(ArmCrossAxis, Body.InvI() * ArmCrossAxis)
+			+ AdditionalInverseMass;
 		if (!FMath::IsFinite(InverseMass)
 			|| InverseMass <= Chaos::FSolverReal(KINDA_SMALL_NUMBER)) { return; }
 
@@ -168,6 +172,11 @@ int32 FCirrovaWheelFrictionConstraints::NumActiveConstraints() const
 	return Count;
 }
 
+float FCirrovaWheelFrictionConstraints::GetWheelInverseMass(const int32 ConstraintIndex) const
+{
+	return Slots.IsValidIndex(ConstraintIndex) ? Slots[ConstraintIndex].WheelInverseMass : 0.0f;
+}
+
 void FCirrovaWheelFrictionConstraints::ReleaseConstraint(int32 ConstraintIndex)
 {
 	if (!Slots.IsValidIndex(ConstraintIndex)) { return; }
@@ -278,6 +287,7 @@ void FCirrovaWheelFrictionConstraints::ResetFrameOutput(FSlot& Slot)
 	Slot.FrameResults = FCirrovaWheelFrictionResults();
 	Slot.AccumulatedLongitudinal = 0.0f;
 	Slot.AccumulatedLateral = 0.0f;
+	Slot.WheelInverseMass = 0.0f;
 }
 
 void FCirrovaWheelFrictionConstraints::SetConstraintEnabled(int32 ConstraintIndex, bool bEnabled)
@@ -441,6 +451,16 @@ void FCirrovaWheelFrictionConstraints::GatherSingle(int32 ConstraintIndex, float
 	Slot.AccumulatedLateral = 0.0f;
 	Slot.MaxLongitudinalImpulse = Slot.Settings.FrictionForceLimit * Dt;
 	Slot.MaxLateralImpulse = Slot.Settings.LateralForceLimit * Dt;
+
+	// 轮端自由度消元：R²/J（cm² / (kg·cm²) = 1/kg）。制动锁止时按 0 处理。
+	const float RadiusCm = Slot.Settings.WheelRadiusCm;
+	const float Inertia = Slot.Settings.WheelInertiaKgCm2;
+	Slot.WheelInverseMass = !Slot.Settings.bWheelLocked
+		&& RadiusCm > KINDA_SMALL_NUMBER
+		&& Inertia > KINDA_SMALL_NUMBER
+		? (RadiusCm * RadiusCm) / Inertia
+		: 0.0f;
+	if (!FMath::IsFinite(Slot.WheelInverseMass)) { Slot.WheelInverseMass = 0.0f; }
 }
 
 void FCirrovaWheelFrictionConstraints::ScatterOutput(
@@ -522,7 +542,8 @@ void FCirrovaWheelFrictionConstraints::ApplySingle(int32 ConstraintIndex)
 		LongitudinalAxis,
 		LongitudinalTarget,
 		static_cast<Chaos::FSolverReal>(Slot.MaxLongitudinalImpulse),
-		AccumulatedLongitudinal
+		AccumulatedLongitudinal,
+		static_cast<Chaos::FSolverReal>(Slot.WheelInverseMass)
 	);
 	Slot.AccumulatedLongitudinal = static_cast<float>(AccumulatedLongitudinal);
 
@@ -542,7 +563,8 @@ void FCirrovaWheelFrictionConstraints::ApplySingle(int32 ConstraintIndex)
 		LateralAxis,
 		LateralTarget,
 		LateralBound,
-		AccumulatedLateral
+		AccumulatedLateral,
+		Chaos::FSolverReal(0)
 	);
 	Slot.AccumulatedLateral = static_cast<float>(AccumulatedLateral);
 }

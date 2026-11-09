@@ -33,6 +33,15 @@ struct FCirrovaWheelFrictionSettings
 	// 轮面线速度（cm/s），纵向约束的目标速度组成部分。
 	float WheelSurfaceSpeed = 0.0f;
 
+	// 车轮半径（cm）与轮端等效转动惯量（kg·cm²）。
+	// 纵向约束用 J_eff 把轮端自由度消元进有效质量：R²/J 与底盘接触点逆质量相加。
+	float WheelRadiusCm = 0.0f;
+	float WheelInertiaKgCm2 = 0.0f;
+
+	// 制动器可在轮胎扭矩范围内锁止车轮；true 时轮端逆惯量按 0 处理，
+	// 纵向冲量按纯底盘求解，轮端反作用由一维域制动器承担。
+	bool bWheelLocked = false;
+
 	// 摩擦圆上限（kg·cm/s²），作为两轴冲量的共同界。
 	float FrictionForceLimit = 0.0f;
 
@@ -74,9 +83,10 @@ protected:
 /**
  * 轮胎摩擦约束容器：每轮一条约束，在宿主求解器的速度迭代内求解。
  *
- * 约束只作用于底盘刚体；车轮角速度由一维动力流拥有，反作用冲量在下一物理步
- * 以力矩形式回注。容器必须随求解器生存期存在：注册后不可移除，销毁前须确保
- * 求解器已停止步进。
+ * 纵向约束把轮端等效惯量 J_eff 消元进标量有效质量，冲量同时决定底盘速度增量
+ * 与轮端反作用力矩；侧向约束仍只作用于底盘。车轮角速度由一维动力流积分，
+ * 反作用冲量在同一物理步的 PostSolve 以力矩回注。容器必须随求解器生存期存在：
+ * 注册后不可移除，销毁前须确保求解器已停止步进。
  *
  * 直接继承约束容器基类而不使用索引容器模板：模板的内联构造函数会把其中间基类
  * 虚表实例化到本模块，而虚表中未覆写的槽位指向引擎未导出的实现。
@@ -130,6 +140,9 @@ public:
 
 	// 仍绑定粒子的约束数量。
 	int32 NumActiveConstraints() const;
+
+	// 指定约束当前的轮端惯量消元项 R²/J（1/kg）；锁止或未启用时为 0。
+	float GetWheelInverseMass(int32 ConstraintIndex) const;
 
 	// FPBDConstraintContainer 接口。
 	virtual int32 GetNumConstraints() const override final { return NumConstraints(); }
@@ -208,6 +221,9 @@ private:
 		float MaxLateralImpulse = 0.0f;
 		float AccumulatedLongitudinal = 0.0f;
 		float AccumulatedLateral = 0.0f;
+
+		// 轮端惯量消元项 R²/J（1/kg）；0 表示退化为纯底盘约束。
+		float WheelInverseMass = 0.0f;
 
 		int32 OwnerId = INDEX_NONE;
 		int32 LastSeenFrame = -1;

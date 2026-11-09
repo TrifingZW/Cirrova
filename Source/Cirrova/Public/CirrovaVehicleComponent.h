@@ -67,6 +67,14 @@ struct FCirrovaWheelState
 	)
 	float EffectiveInertia = 0.0f;
 
+	// 轮胎约束当前的轮端惯量消元项 R²/J（1/kg）；制动锁止或未启用时为 0。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "轮端惯量消元项 (1/kg)")
+	)
+	float ConstraintWheelInverseMass = 0.0f;
+
 #pragma endregion
 
 #pragma region 接触
