@@ -18,6 +18,8 @@ struct FCirrovaTestVehicleSetup
 	bool bUseNativeSuspension = true;
 	float TireRelaxationLength = 0.3f;
 	bool bEnableAerodynamics = true;
+	bool bUseBaselineSuspension = false;
+	bool bUseProgressiveSuspension = false;
 };
 
 /**
@@ -85,4 +87,10 @@ private:
 
 	UPROPERTY()
 	bool bEnableAerodynamics = true;
+
+	UPROPERTY()
+	bool bUseBaselineSuspension = false;
+
+	UPROPERTY()
+	bool bUseProgressiveSuspension = false;
 };

@@ -44,6 +44,42 @@ void ACirrovaTestVehicle::PostInitializeComponents()
 	Vehicle->bAllowPhysicsSleep = false;
 	Vehicle->TireRelaxationLength = TireRelaxationLength;
 	Vehicle->bEnableAerodynamics = bEnableAerodynamics;
+
+	if (bUseBaselineSuspension)
+	{
+		for (FCirrovaWheelConfig& Config : Vehicle->WheelConfigs)
+		{
+			Config.CompressionDamping = 0.0f;
+			Config.ReboundDamping = 0.0f;
+			Config.SuspensionPreload = 0.0f;
+			Config.BumpStopStiffness = 0.0f;
+			Config.BumpStopStart = 0.0f;
+			Config.SuspensionCurve.Reset();
+		}
+	}
+	if (bUseProgressiveSuspension)
+	{
+		for (FCirrovaWheelConfig& Config : Vehicle->WheelConfigs)
+		{
+			Config.CompressionDamping = 3600.0f;
+			Config.ReboundDamping = 5200.0f;
+			Config.SuspensionPreload = 200.0f;
+			Config.BumpStopStiffness = 30000.0f;
+			Config.BumpStopStart = 0.12f;
+			Config.SuspensionCurve.Reset();
+			auto AddPoint = [&Config](const float Compression, const float Scale)
+			{
+				FCirrovaSuspensionCurvePoint Point;
+				Point.Compression = Compression;
+				Point.StiffnessScale = Scale;
+				Config.SuspensionCurve.Add(Point);
+			};
+			AddPoint(0.0f, 1.0f);
+			AddPoint(0.10f, 1.0f);
+			AddPoint(0.13f, 1.25f);
+			AddPoint(0.15f, 1.5f);
+		}
+	}
 }
 
 void ACirrovaTestVehicle::Configure(const FCirrovaTestVehicleSetup& InSetup)
@@ -55,6 +91,8 @@ void ACirrovaTestVehicle::Configure(const FCirrovaTestVehicleSetup& InSetup)
 	bUseNativeSuspension = InSetup.bUseNativeSuspension;
 	TireRelaxationLength = InSetup.TireRelaxationLength;
 	bEnableAerodynamics = InSetup.bEnableAerodynamics;
+	bUseBaselineSuspension = InSetup.bUseBaselineSuspension;
+	bUseProgressiveSuspension = InSetup.bUseProgressiveSuspension;
 }
 
 void ACirrovaTestVehicle::SetInputs(

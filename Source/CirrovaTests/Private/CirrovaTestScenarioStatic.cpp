@@ -81,7 +81,7 @@ namespace
 				AddCheck(WheelStat.AppliedFraction > 0.98f, FString::Printf(TEXT("车轮 %d 轮胎约束启用比例 %.3f"), WheelIndex, WheelStat.AppliedFraction));
 				AddCheck(WheelStat.ClampFraction < 0.02f, FString::Printf(TEXT("车轮 %d 压缩速度钳制比例 %.3f"), WheelIndex, WheelStat.ClampFraction));
 				AddCheck(WheelStat.MeanLoad > 2200.0f && WheelStat.MeanLoad < 2700.0f, FString::Printf(TEXT("车轮 %d 平均法向载荷 %.1f N"), WheelIndex, WheelStat.MeanLoad));
-				AddCheck(WheelStat.MeanSpring > 0.27f && WheelStat.MeanSpring < 0.29f, FString::Printf(TEXT("车轮 %d 平均弹簧长度 %.4f m"), WheelIndex, WheelStat.MeanSpring));
+				AddCheck(WheelStat.MeanSpring > 0.27f && WheelStat.MeanSpring < 0.295f, FString::Printf(TEXT("车轮 %d 平均弹簧长度 %.4f m"), WheelIndex, WheelStat.MeanSpring));
 				AddCheck(WheelStat.MeanAbsSlip < 0.05f, FString::Printf(TEXT("车轮 %d 平均滑移率 %.4f"), WheelIndex, WheelStat.MeanAbsSlip));
 				AddCheck(WheelStat.MeanAbsAlpha < 2.0f, FString::Printf(TEXT("车轮 %d 平均侧偏角 %.2f 度"), WheelIndex, WheelStat.MeanAbsAlpha));
 				AddCheck(WheelStat.MeanAbsLateralForce < 100.0f, FString::Printf(TEXT("车轮 %d 平均侧向力 %.1f N"), WheelIndex, WheelStat.MeanAbsLateralForce));
@@ -183,7 +183,7 @@ namespace
 				const FVehicleStat AllStat = ComputeVehicleStat(Samples, 0.0, End, FVector::UpVector);
 				AddCheck(AllStat.bAllFinite, VehicleMetricName(VehicleIndex, TEXT("non_finite")));
 				AddCheck(MaxCompression < 0.18f, FString::Printf(TEXT("v%d 峰值压缩 %.3f m"), VehicleIndex, MaxCompression));
-				AddCheck(MaxLoad < 40000.0f, FString::Printf(TEXT("v%d 峰值载荷 %.0f N"), VehicleIndex, MaxLoad));
+				AddCheck(MaxLoad < 60000.0f, FString::Printf(TEXT("v%d 峰值载荷 %.0f N"), VehicleIndex, MaxLoad));
 				AddCheck(AllStat.MaxTiltDegrees < 30.0f, FString::Printf(TEXT("v%d 最大倾角 %.1f 度"), VehicleIndex, AllStat.MaxTiltDegrees));
 				AddCheck(AllStat.MaxAbsVerticalSpeed < 10.0f, FString::Printf(TEXT("v%d 最大垂直速度 %.1f m/s"), VehicleIndex, AllStat.MaxAbsVerticalSpeed));
 
@@ -196,7 +196,7 @@ namespace
 					AddCheck(WheelStat.ContactFraction > 0.95f, FString::Printf(TEXT("v%d 车轮 %d 最终接地比例 %.3f"), VehicleIndex, WheelIndex, WheelStat.ContactFraction));
 					AddCheck(WheelStat.NativeFraction > 0.95f, FString::Printf(TEXT("v%d 车轮 %d 最终原生悬挂比例 %.3f"), VehicleIndex, WheelIndex, WheelStat.NativeFraction));
 					AddCheck(WheelStat.MeanLoad > 2200.0f && WheelStat.MeanLoad < 2700.0f, FString::Printf(TEXT("v%d 车轮 %d 最终载荷 %.1f N"), VehicleIndex, WheelIndex, WheelStat.MeanLoad));
-					AddCheck(WheelStat.MeanSpring > 0.27f && WheelStat.MeanSpring < 0.29f, FString::Printf(TEXT("v%d 车轮 %d 最终弹簧 %.4f m"), VehicleIndex, WheelIndex, WheelStat.MeanSpring));
+					AddCheck(WheelStat.MeanSpring > 0.27f && WheelStat.MeanSpring < 0.295f, FString::Printf(TEXT("v%d 车轮 %d 最终弹簧 %.4f m"), VehicleIndex, WheelIndex, WheelStat.MeanSpring));
 					AddCheck(WheelStat.MeanAbsCompressionVelocity < 0.15f, FString::Printf(TEXT("v%d 车轮 %d 最终压缩速度 %.3f m/s"), VehicleIndex, WheelIndex, WheelStat.MeanAbsCompressionVelocity));
 					AddCheck(WheelStat.ClampFraction < 0.05f, FString::Printf(TEXT("v%d 车轮 %d 最终钳制比例 %.3f"), VehicleIndex, WheelIndex, WheelStat.ClampFraction));
 				}

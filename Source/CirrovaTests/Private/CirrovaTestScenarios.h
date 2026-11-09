@@ -59,4 +59,5 @@ namespace CirrovaTest
 	TUniquePtr<FCirrovaTestScenario> CreateStaticScenario(const FString& Name);
 	TUniquePtr<FCirrovaTestScenario> CreateSlopeScenario(const FString& Name);
 	TUniquePtr<FCirrovaTestScenario> CreateDrivetrainScenario(const FString& Name);
+	TUniquePtr<FCirrovaTestScenario> CreateSuspensionScenario(const FString& Name);
 }
