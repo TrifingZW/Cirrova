@@ -281,6 +281,7 @@ void FCirrovaTestHarness::Tick(const float DeltaTime)
 			AppendFloat(Fields, Wheel.LongitudinalImpulse);
 			AppendFloat(Fields, Wheel.LateralImpulse);
 			AppendFloat(Fields, Wheel.ImpulseWindow);
+			AppendFloat(Fields, Wheel.ConstraintWheelInverseMass);
 
 			const FString Line = FString::Join(Fields, TEXT(",")) + TEXT("\r\n");
 			FTCHARToUTF8 Utf8(*Line);
@@ -334,7 +335,7 @@ void FCirrovaTestHarness::BeginCase(const FString& InCaseName)
 		"slip_ratio,slip_angle_deg,relaxed_slip_angle_deg,fx_n,fy_n,omega_rad_s,surface_speed_m_s,"
 		"effective_inertia,friction_limit_n,lateral_limit_n,util,native_active,using_constraint_length,"
 		"constraint_length_m,antiroll_n,rolling_n,tire_constraint_applied,"
-		"long_impulse_ns,lat_impulse_ns,impulse_window_s\r\n"
+		"long_impulse_ns,lat_impulse_ns,impulse_window_s,constraint_wheel_inv_mass_1_kg\r\n"
 	);
 	FTCHARToUTF8 Utf8(*Header);
 	CsvFile->Serialize(reinterpret_cast<uint8*>(const_cast<ANSICHAR*>(Utf8.Get())), Utf8.Length());

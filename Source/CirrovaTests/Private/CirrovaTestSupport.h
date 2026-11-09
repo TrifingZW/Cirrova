@@ -31,6 +31,7 @@ namespace CirrovaTestSupport
 		float MeanAbsLateralForce = 0.0f;
 		float MeanLongitudinalForce = 0.0f;
 		float MeanAbsOmega = 0.0f;
+		float MeanConstraintWheelInverseMass = 0.0f;
 		float MaxAbsLateralForce = 0.0f;
 		float MaxAbsLongitudinalForce = 0.0f;
 	};
@@ -94,6 +95,7 @@ namespace CirrovaTestSupport
 			Stat.MeanAbsLateralForce += FMath::Abs(Wheel.TireLateralForce);
 			Stat.MeanLongitudinalForce += Wheel.TireLongitudinalForce;
 			Stat.MeanAbsOmega += FMath::Abs(Wheel.Omega);
+			Stat.MeanConstraintWheelInverseMass += Wheel.ConstraintWheelInverseMass;
 			Stat.MaxAbsLateralForce = FMath::Max(Stat.MaxAbsLateralForce, FMath::Abs(Wheel.TireLateralForce));
 			Stat.MaxAbsLongitudinalForce =
 				FMath::Max(Stat.MaxAbsLongitudinalForce, FMath::Abs(Wheel.TireLongitudinalForce));
@@ -119,6 +121,7 @@ namespace CirrovaTestSupport
 		Stat.MeanAbsLateralForce *= InvCount;
 		Stat.MeanLongitudinalForce *= InvCount;
 		Stat.MeanAbsOmega *= InvCount;
+		Stat.MeanConstraintWheelInverseMass *= InvCount;
 		return Stat;
 	}
 

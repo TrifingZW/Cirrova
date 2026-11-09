@@ -179,6 +179,7 @@ namespace
 					const FWheelStat WheelStat = ComputeWheelStat(Samples, WheelIndex, 5.0, End);
 					if (WheelStat.Count <= 0) { continue; }
 					AddCheck(WheelStat.MeanAbsOmega < 0.5f, FString::Printf(TEXT("v%d 车轮 %d 驻车角速度 %.3f rad/s"), Index, WheelIndex, WheelStat.MeanAbsOmega));
+					AddCheck(WheelStat.MeanConstraintWheelInverseMass < 0.005f, FString::Printf(TEXT("v%d 车轮 %d 制动期间轮端未锁止（R²/J=%.4f）"), Index, WheelIndex, WheelStat.MeanConstraintWheelInverseMass));
 					ForceSum += WheelStat.MeanLongitudinalForce;
 					MaxUtilization = FMath::Max(MaxUtilization, WheelStat.MaxUtilization);
 				}
@@ -271,7 +272,7 @@ namespace
 				}
 			}
 
-			if (Elapsed < 8.0f) { return; }
+			if (Elapsed < 9.5f) { return; }
 
 			for (int32 Index = 0; Index < Harness.GetVehicleCount(); ++Index)
 			{

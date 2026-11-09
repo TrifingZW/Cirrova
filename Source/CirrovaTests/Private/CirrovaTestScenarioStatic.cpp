@@ -286,6 +286,7 @@ namespace
 
 				const FWheelStat EarlyBraking = ComputeWheelStat(Samples, WheelIndex, 3.1, 5.0);
 				AddCheck(EarlyBraking.MeanLongitudinalForce < -200.0f, FString::Printf(TEXT("车轮 %d 平均制动力 %.0f N"), WheelIndex, EarlyBraking.MeanLongitudinalForce));
+				AddCheck(EarlyBraking.MeanConstraintWheelInverseMass < 0.005f, FString::Printf(TEXT("车轮 %d 制动期间轮端未锁止（R²/J=%.4f）"), WheelIndex, EarlyBraking.MeanConstraintWheelInverseMass));
 
 				const int32 SignChanges = CountSignChanges(Samples, WheelIndex, End - 1.0, End, 50.0f);
 				AddCheck(SignChanges <= 4, FString::Printf(TEXT("车轮 %d 最终纵向力符号震荡 %d 次"), WheelIndex, SignChanges));
@@ -364,6 +365,7 @@ namespace
 				if (WheelStat.Count <= 0) { continue; }
 
 				AddCheck(WheelStat.MeanLongitudinalForce > 80.0f, FString::Printf(TEXT("车轮 %d 平均驱动力 %.0f N"), WheelIndex, WheelStat.MeanLongitudinalForce));
+				AddCheck(WheelStat.MeanConstraintWheelInverseMass > 0.0f, FString::Printf(TEXT("车轮 %d 轮端自由度未进入约束（R²/J=%.4f）"), WheelIndex, WheelStat.MeanConstraintWheelInverseMass));
 				AddCheck(WheelStat.MeanAbsSlip < 30.0f, FString::Printf(TEXT("车轮 %d 平均滑移率 %.2f"), WheelIndex, WheelStat.MeanAbsSlip));
 				AddCheck(WheelStat.ContactFraction > 0.5f, FString::Printf(TEXT("车轮 %d 接地比例 %.3f"), WheelIndex, WheelStat.ContactFraction));
 

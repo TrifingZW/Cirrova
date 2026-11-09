@@ -75,6 +75,7 @@ namespace
 				{
 					const FWheelStat WheelStat = ComputeWheelStat(Samples, WheelIndex, 2.7, End);
 					WheelForces[WheelIndex] = WheelStat.MeanLongitudinalForce;
+					AddCheck(WheelStat.MeanConstraintWheelInverseMass > 0.0f, FString::Printf(TEXT("v%d 车轮 %d 轮端自由度未进入约束（R²/J=%.4f）"), Index, WheelIndex, WheelStat.MeanConstraintWheelInverseMass));
 				}
 
 				const bool bFrontDriven = Index != 0; // FWD 与 AWD 的前轴驱动
