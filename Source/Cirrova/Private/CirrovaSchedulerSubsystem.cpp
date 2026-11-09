@@ -5,6 +5,8 @@
 #include "CirrovaVehicleComponent.h"
 #include "CirrovaWheelFrictionConstraints.h"
 #include "Chaos/PBDRigidsEvolutionGBF.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformTime.h"
 #include "PBDRigidsSolver.h"
 #include "Engine/World.h"
 #include "Physics/PhysicsInterfaceCore.h"
@@ -12,6 +14,47 @@
 
 namespace
 {
+	// P0 性能基线：按需输出物理步耗时统计。
+	static TAutoConsoleVariable<int32> CVarCirrovaLogPhysicsStats(
+		TEXT("Cirrova.LogPhysicsStats"),
+		0,
+		TEXT("1 = 周期输出 Cirrova 物理步统计。"),
+		ECVF_Default
+	);
+	static TAutoConsoleVariable<float> CVarCirrovaLogPhysicsStatsInterval(
+		TEXT("Cirrova.LogPhysicsStatsInterval"),
+		1.0f,
+		TEXT("物理统计输出间隔（秒）。"),
+		ECVF_Default
+	);
+
+	// Chaos 悬挂在低速时会把地面法线替换为世界上方（防滑机制）。该机制会掩盖轮胎摩擦，
+	// Cirrova 默认关闭，悬挂沿真实悬挂轴作用；设为 1 可恢复引擎原行为用于对照。
+	static TAutoConsoleVariable<int32> CVarCirrovaSuspensionSlopeAssist(
+		TEXT("Cirrova.SuspensionSlopeAssist"),
+		0,
+		TEXT("1 = 保留 Chaos 低速斜坡防滑；0 = 使用真实悬挂轴（世界启动时读取）。"),
+		ECVF_Default
+	);
+
+	/** 将 Cirrova 的斜坡防滑开关同步到 Chaos 悬挂 CVar；仅在世界启动时调用。 */
+	void ApplySuspensionSlopeAssistSetting()
+	{
+		IConsoleVariable* SlopeThreshold = IConsoleManager::Get().FindConsoleVariable(
+			TEXT("p.Chaos.Suspension.SlopeThreshold")
+		);
+		if (!SlopeThreshold) { return; }
+
+		const bool bAssist = CVarCirrovaSuspensionSlopeAssist.GetValueOnGameThread() != 0;
+		SlopeThreshold->Set(bAssist ? 0.707f : 1.0f, ECVF_SetByProjectSetting);
+		UE_LOG(
+			LogCirrova,
+			Log,
+			TEXT("Cirrova 调度器：Chaos 低速斜坡防滑=%s。"),
+			bAssist ? TEXT("启用（对照）") : TEXT("关闭（真实悬挂轴）")
+		);
+	}
+
 	/** 已脱离求解器、等待世界对象失效后释放的约束容器。 */
 	struct FRetiredWheelConstraints
 	{
@@ -51,6 +94,7 @@ void UCirrovaSchedulerSubsystem::PostInitialize()
 
 	// 新世界启动时回收已失效世界的容器。
 	PruneRetiredWheelConstraints();
+	ApplySuspensionSlopeAssistSetting();
 
 	// 编辑器预览等无物理场景的世界同样会创建本子系统，此时跳过绑定。
 	PhysicsScene = World->GetPhysicsScene();
@@ -278,10 +322,22 @@ void UCirrovaSchedulerSubsystem::OnPhysScenePreTick(
 
 void UCirrovaSchedulerSubsystem::OnPhysScenePostTick(FChaosScene* ChaosScene)
 {
+	float LatestPreSimulateMs = 0.0f;
+	float LatestStepWallMs = 0.0f;
+	float LatestPostSolveMs = 0.0f;
+	int32 LatestVehicleCount = 0;
+	bool bHasStats = false;
+
 	if (AsyncCallback)
 	{
 		while (auto Output = AsyncCallback->PopOutputData_External())
 		{
+			LatestPreSimulateMs = Output->PreSimulateMs;
+			LatestStepWallMs = Output->StepWallMs;
+			LatestPostSolveMs = Output->PostSolveMs;
+			LatestVehicleCount = Output->VehicleCount;
+			bHasStats = true;
+
 			for (const FCirrovaVehicleOutput& VehicleOutput : Output->Vehicles)
 			{
 				if (UCirrovaVehicleComponent* Component = FindComponent(VehicleOutput.VehicleId))
@@ -292,6 +348,50 @@ void UCirrovaSchedulerSubsystem::OnPhysScenePostTick(FChaosScene* ChaosScene)
 		}
 	}
 
+	// P0 性能基线：仅在 CVar 开启时按间隔输出。
+	if (bHasStats)
+	{
+		LastStepWallMs = LatestStepWallMs;
+		PeakStepWallMs = FMath::Max(PeakStepWallMs, LatestStepWallMs);
+		StepWallMsSum += LatestStepWallMs;
+		++StepWallMsSamples;
+	}
+	if (bHasStats && CVarCirrovaLogPhysicsStats.GetValueOnGameThread() != 0)
+	{
+		const double Now = FPlatformTime::Seconds();
+		const float Interval = FMath::Max(
+			CVarCirrovaLogPhysicsStatsInterval.GetValueOnGameThread(),
+			0.1f
+		);
+		if (PhysicsStatsLastLogSeconds <= 0.0) { PhysicsStatsLastLogSeconds = Now; }
+		if (Now - PhysicsStatsLastLogSeconds >= Interval)
+		{
+			PhysicsStatsLastLogSeconds = Now;
+			UE_LOG(
+				LogCirrova,
+				Log,
+				TEXT("Cirrova 物理统计：载具 %d，步墙钟 %.2f ms（准备 %.2f ms，收尾 %.2f ms），轮胎约束槽 %d。"),
+				LatestVehicleCount,
+				LatestStepWallMs,
+				LatestPreSimulateMs,
+				LatestPostSolveMs,
+				WheelConstraints.IsValid() ? WheelConstraints->NumActiveConstraints() : 0
+			);
+		}
+	}
+
 	// 物理步进已结束，释放已注销载具的运行态。
 	ReleasePendingRuntimes();
+}
+
+int32 UCirrovaSchedulerSubsystem::GetActiveWheelConstraintCount() const
+{
+	return WheelConstraints.IsValid() ? WheelConstraints->NumActiveConstraints() : 0;
+}
+
+float UCirrovaSchedulerSubsystem::GetAveragePhysicsStepMs() const
+{
+	return StepWallMsSamples > 0
+		? static_cast<float>(StepWallMsSum / static_cast<double>(StepWallMsSamples))
+		: 0.0f;
 }

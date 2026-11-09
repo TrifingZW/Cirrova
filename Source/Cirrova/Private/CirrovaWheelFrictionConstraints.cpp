@@ -161,6 +161,13 @@ bool FCirrovaWheelFrictionConstraints::IsBoundToOwner(int32 ConstraintIndex, int
 		&& Slots[ConstraintIndex].OwnerId == OwnerId;
 }
 
+int32 FCirrovaWheelFrictionConstraints::NumActiveConstraints() const
+{
+	int32 Count = 0;
+	for (const FSlot& Slot : Slots) { if (Slot.bBound) { ++Count; } }
+	return Count;
+}
+
 void FCirrovaWheelFrictionConstraints::ReleaseConstraint(int32 ConstraintIndex)
 {
 	if (!Slots.IsValidIndex(ConstraintIndex)) { return; }

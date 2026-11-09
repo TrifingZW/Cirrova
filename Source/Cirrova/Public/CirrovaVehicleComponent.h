@@ -155,6 +155,14 @@ struct FCirrovaWheelState
 	)
 	float SlipAngleDegrees = 0.0f;
 
+	// 一阶松弛过滤后的侧偏角（deg），仅用于侧向力模型。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "松弛侧偏角 (deg)")
+	)
+	float RelaxedSlipAngleDegrees = 0.0f;
+
 #pragma endregion
 
 #pragma region 悬挂
@@ -489,6 +497,15 @@ struct FCirrovaEngineCurvePoint
 	float TorqueScale = 1.0f;
 };
 
+/** 驱动布局：按挂点前后坐标自动划分前/后轴。 */
+UENUM(BlueprintType)
+enum class ECirrovaDriveLayout : uint8
+{
+	RWD UMETA(DisplayName = "后驱"),
+	FWD UMETA(DisplayName = "前驱"),
+	AWD UMETA(DisplayName = "四驱")
+};
+
 UCLASS(
 	Blueprintable,
 	BlueprintType,
@@ -619,6 +636,33 @@ public:
 	)
 	float DifferentialMaxTorque = 100.0f;
 
+	// 驱动布局：按挂点前后坐标（UE +X 为前）自动划分前/后轴。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "驱动布局")
+	)
+	ECirrovaDriveLayout DriveLayout = ECirrovaDriveLayout::AWD;
+
+	// 四驱中央差速器限滑扭矩容量（N·m）；0 为纯开式。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "中央差速器限滑扭矩容量")
+	)
+	float CenterDifferentialMaxTorque = 200.0f;
+
+	// 中央差速器/轮轴转动惯量（kg·m²）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "中央轮轴转动惯量")
+	)
+	float CenterAxleInertia = 0.3f;
+
 	// 车轮转动惯量（kg·m²）。
 	UPROPERTY(
 		EditAnywhere,
@@ -646,6 +690,15 @@ public:
 	)
 	float MaxBrakeTorque = 2000.0f;
 
+	// 使用球体扫掠接触检测（扫掠半径 = 车轮半径）；关闭则使用零厚度射线。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|车轮",
+		meta = (DisplayName = "球体接触扫掠")
+	)
+	bool bUseSphereContactProbe = true;
+
 	// 使用 Chaos 原生悬挂约束（默认物理路径）；轮胎求解器约束独立于该开关。仅初始化时读取，运行时修改不生效。
 	UPROPERTY(
 		EditAnywhere,
@@ -654,6 +707,15 @@ public:
 		meta = (DisplayName = "原生悬挂约束")
 	)
 	bool bUseNativeSuspension = true;
+
+	// 允许底盘物理休眠；关闭后每步保持唤醒，适合需要持续静态摩擦/约束测量的载具。仅初始化时读取。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|物理",
+		meta = (DisplayName = "允许物理休眠")
+	)
+	bool bAllowPhysicsSleep = true;
 
 	// 防倾杆：每项连接一对车轮，刚度 0 表示禁用。
 	UPROPERTY(
@@ -709,6 +771,15 @@ public:
 	)
 	float TireRollingResistance = 0.015f;
 
+	// 轮胎侧向松弛长度（m）；0 关闭瞬态过滤，侧偏力对侧偏角即时响应。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|轮胎",
+		meta = (DisplayName = "轮胎松弛长度")
+	)
+	float TireRelaxationLength = 0.3f;
+
 	// 最大转向角（度）。
 	UPROPERTY(
 		EditAnywhere,
@@ -718,16 +789,16 @@ public:
 	)
 	float MaxSteeringAngle = 35.0f;
 
-	// 车轮射线碰撞通道。
+	// 车轮接触检测碰撞通道。
 	UPROPERTY(
 		EditAnywhere,
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|调试",
-		meta = (DisplayName = "射线碰撞通道")
+		meta = (DisplayName = "车轮接触通道")
 	)
 	TEnumAsByte<ECollisionChannel> WheelTraceChannel = ECC_Visibility;
 
-	// 绘制车轮射线与受力调试图元。
+	// 绘制车轮接触与受力调试图元。
 	UPROPERTY(
 		EditAnywhere,
 		BlueprintReadOnly,
@@ -735,6 +806,82 @@ public:
 		meta = (DisplayName = "绘制调试图元")
 	)
 	bool bDrawDebug = false;
+
+	// P0 验证：按固定间隔输出完整遥测日志。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|调试",
+		meta = (DisplayName = "周期输出遥测")
+	)
+	bool bLogTelemetryPeriodically = false;
+
+	// P0 验证：周期遥测输出间隔（s）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|调试",
+		meta = (DisplayName = "遥测输出间隔 (s)", ClampMin = "0.1")
+	)
+	float TelemetryLogIntervalSeconds = 1.0f;
+
+#pragma region 空气动力学
+
+	// 启用空气动力学（阻力与下压力）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|空气动力学",
+		meta = (DisplayName = "启用空气动力学")
+	)
+	bool bEnableAerodynamics = true;
+
+	// 空气密度（kg/m³）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|空气动力学",
+		meta = (DisplayName = "空气密度")
+	)
+	float AirDensity = 1.225f;
+
+	// 风阻系数。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|空气动力学",
+		meta = (DisplayName = "风阻系数")
+	)
+	float DragCoefficient = 0.35f;
+
+	// 迎风面积（m²）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|空气动力学",
+		meta = (DisplayName = "迎风面积")
+	)
+	float FrontalArea = 2.2f;
+
+	// 下压力系数（正值为下压）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|空气动力学",
+		meta = (DisplayName = "下压力系数")
+	)
+	float DownforceCoefficient = 0.8f;
+
+	// 下压力作用点相对底盘原点的偏移（cm），用于俯仰/侧倾力矩。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|空气动力学",
+		meta = (DisplayName = "下压力作用点 (cm)")
+	)
+	FVector AeroCenterOfPressure = FVector::ZeroVector;
+
+#pragma endregion
 
 #pragma endregion
 
@@ -794,6 +941,14 @@ private:
 	// 接地但无悬挂载荷的累计时间与告警状态（检测双重支撑）。
 	float NoSuspensionLoadSeconds = 0.0f;
 	bool bWarnedNoSuspensionLoad = false;
+
+	// 地面代理不被原生悬挂约束支持时的告警状态。
+	bool bWarnedGroundProxyFallback = false;
+
+	// P0 验证：周期遥测累计时间与不变量告警状态。
+	float TelemetryLogAccumulator = 0.0f;
+	bool bWarnedNonFiniteTelemetry = false;
+	bool bWarnedNativeSuspensionInactive = false;
 
 	// 本步轮胎耦合形态：true 为求解器约束，false 为外力回退。
 	UPROPERTY(
@@ -913,6 +1068,21 @@ public:
 		meta = (DisplayName = "是否接地")
 	)
 	bool IsGrounded() const;
+
+	// 最近一次物理步的车轮遥测快照（只读）。
+	const TArray<FCirrovaWheelState>& GetWheelStates() const { return WheelStates; }
+
+	// 最近一次物理步的发动机角速度（rad/s）。
+	float GetEngineOmega() const { return EngineOmega; }
+
+	// 轮胎是否以求解器约束耦合；false 表示外力回退。
+	bool IsTireConstraintCoupling() const { return bDebugTireConstraintCoupling; }
+
+	// 轮胎耦合的内部子步数；约束模式恒为 1。
+	int32 GetAppliedSubsteps() const { return DebugAppliedSubsteps; }
+
+	// 最近一次物理步的求解器步长（s）。
+	float GetSolverDeltaTime() const { return DebugSolverDeltaTime; }
 
 	// 指定车轮的多行遥测文本，供调试 HUD 直接显示。
 	UFUNCTION(

@@ -43,6 +43,15 @@ class CIRROVA_API UCirrovaSchedulerSubsystem : public UWorldSubsystem
 
 	int32 NextVehicleId = 0;
 
+	// P0 性能基线：上次输出物理统计的墙钟时间。
+	double PhysicsStatsLastLogSeconds = 0.0;
+
+	// P0 物理步耗时（ms）：最近、峰值与累计平均。
+	float LastStepWallMs = 0.0f;
+	float PeakStepWallMs = 0.0f;
+	double StepWallMsSum = 0.0;
+	int64 StepWallMsSamples = 0;
+
 public:
 #pragma region Subsystem Interface
 
@@ -62,6 +71,17 @@ public:
 
 	// 注销载具；运行态延迟到物理步进结束后释放。
 	void UnregisterVehicle(const UCirrovaVehicleComponent* Component);
+
+	// 已注册载具数量（仅游戏线程）。
+	int32 GetRegisteredVehicleCount() const { return Vehicles.Num(); }
+
+	// 仍绑定粒子的轮胎约束数量（仅游戏线程）。
+	int32 GetActiveWheelConstraintCount() const;
+
+	// 物理步墙钟耗时统计（ms，仅游戏线程）。
+	float GetLastPhysicsStepMs() const { return LastStepWallMs; }
+	float GetAveragePhysicsStepMs() const;
+	float GetPeakPhysicsStepMs() const { return PeakStepWallMs; }
 
 #pragma endregion
 

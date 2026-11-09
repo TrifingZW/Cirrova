@@ -6,6 +6,7 @@
 #include "CollisionQueryParams.h"
 #include "CollisionShape.h"
 #include "DrawDebugHelpers.h"
+#include "HAL/IConsoleManager.h"
 #include "PBDRigidsSolver.h"
 #include "Chaos/ChaosScene.h"
 #include "Chaos/PBDRigidsEvolution.h"
@@ -23,6 +24,14 @@
 
 namespace
 {
+	// P0 验证：为无头测试强制周期输出遥测。
+	static TAutoConsoleVariable<int32> CVarCirrovaLogTelemetry(
+		TEXT("Cirrova.LogTelemetry"),
+		0,
+		TEXT("1 = 周期输出载具遥测（P0 验证）。"),
+		ECVF_Default
+	);
+
 	// liminal 基（X 右，Y 上，Z 前）→ UE 基（X 前，Y 右，Z 上）的循环置换。
 	const FQuat LiminalToUE(0.5f, 0.5f, 0.5f, 0.5f);
 
@@ -278,6 +287,9 @@ void UCirrovaVehicleComponent::BeginPlay()
 	const FTransform ChassisToWorld = ChassisPrimitive->GetComponentTransform();
 	const FBoxSphereBounds ChassisBounds = ChassisPrimitive->CalcBounds(ChassisToWorld);
 	const float ChassisBottom = ChassisBounds.Origin.Z - ChassisBounds.BoxExtent.Z;
+	// 托底诊断仅在世界水平时具有几何意义；斜面上世界 Z 投影会误报。
+	const bool bLevelChassis =
+		FMath::Abs(FVector::DotProduct(ChassisToWorld.GetUnitAxis(EAxis::Z), FVector::UpVector)) > 0.99f;
 	constexpr float GroundClearanceMargin = 2.0f;
 	for (int32 Index = 0; Index < Runtime->Wheels.Num(); ++Index)
 	{
@@ -317,7 +329,7 @@ void UCirrovaVehicleComponent::BeginPlay()
 				Travel
 			);
 		}
-		if (Clearance < GroundClearanceMargin)
+		if (bLevelChassis && Clearance < GroundClearanceMargin)
 		{
 			UE_LOG(
 				LogCirrova,
@@ -365,6 +377,26 @@ void UCirrovaVehicleComponent::TickComponent(
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	// 驾驶员输入期间保持刚体唤醒：休眠的底盘不会响应求解器内的轮胎冲量。
+	if (ChassisPrimitive.IsValid()
+		&& (ThrottleInput > 0.0f || BrakeInput > 0.0f || !FMath::IsNearlyZero(SteeringInput)))
+	{
+		ChassisPrimitive->WakeRigidBody();
+	}
+
+	// P0 验证：周期输出遥测，无需手动按快照键。
+	const bool bLogTelemetry = bLogTelemetryPeriodically
+		|| CVarCirrovaLogTelemetry.GetValueOnGameThread() != 0;
+	if (bLogTelemetry && TelemetryLogIntervalSeconds > KINDA_SMALL_NUMBER)
+	{
+		TelemetryLogAccumulator += DeltaTime;
+		while (TelemetryLogAccumulator >= TelemetryLogIntervalSeconds)
+		{
+			TelemetryLogAccumulator -= TelemetryLogIntervalSeconds;
+			LogDebugSnapshot();
+		}
+	}
+
 	if (!bDrawDebug || !ChassisPrimitive.IsValid()) { return; }
 
 		const FTransform ChassisToWorld = ChassisPrimitive->GetComponentTransform();
@@ -377,13 +409,29 @@ void UCirrovaVehicleComponent::TickComponent(
 		}
 }
 
-void UCirrovaVehicleComponent::SetThrottle(float Value) { ThrottleInput = Value; }
+void UCirrovaVehicleComponent::SetThrottle(float Value)
+{
+	ThrottleInput = Value;
+	if (ChassisPrimitive.IsValid() && Value > 0.0f) { ChassisPrimitive->WakeRigidBody(); }
+}
 
-void UCirrovaVehicleComponent::SetSteering(float Value) { SteeringInput = Value; }
+void UCirrovaVehicleComponent::SetSteering(float Value)
+{
+	SteeringInput = Value;
+	if (ChassisPrimitive.IsValid() && !FMath::IsNearlyZero(Value)) { ChassisPrimitive->WakeRigidBody(); }
+}
 
-void UCirrovaVehicleComponent::SetBrake(float Value) { BrakeInput = Value; }
+void UCirrovaVehicleComponent::SetBrake(float Value)
+{
+	BrakeInput = Value;
+	if (ChassisPrimitive.IsValid() && Value > 0.0f) { ChassisPrimitive->WakeRigidBody(); }
+}
 
-void UCirrovaVehicleComponent::SetGear(int32 Gear) { GearInput = Gear; }
+void UCirrovaVehicleComponent::SetGear(int32 Gear)
+{
+	GearInput = Gear;
+	if (ChassisPrimitive.IsValid() && Gear != 0) { ChassisPrimitive->WakeRigidBody(); }
+}
 
 float UCirrovaVehicleComponent::GetEngineRPM() const { return EngineOmega * 60.0f / static_cast<float>(2.0 * PI); }
 
@@ -405,7 +453,7 @@ FString UCirrovaVehicleComponent::GetWheelDebugText(int32 WheelIndex) const
 		TEXT("轮 %d %s  耦合:%s  悬挂:%s\n")
 		TEXT("弹簧 %.3f m  约束 %.3f m  压缩 %.3f m  压缩速度 %.2f m/s%s\n")
 		TEXT("法向载荷 %.0f N  悬挂力 %.0f N  防倾 %.0f N  摩擦圆 %.0f N\n")
-		TEXT("滑移率 %.3f  侧偏角 %.1f°  轮面 %.2f m/s  惯量 %.2f kg·m²\n")
+		TEXT("滑移率 %.3f  侧偏角 %.1f°（松弛 %.1f°） 轮面 %.2f m/s  惯量 %.2f kg·m²\n")
 		TEXT("轮胎力 纵 %.0f N 侧 %.0f N  力矩 %.0f N·m  滚动 %.0f N\n")
 		TEXT("摩擦利用 %.2f  冲量 纵 %.2f / 侧 %.2f N·s（窗口 %.1f ms）"),
 		WheelIndex,
@@ -423,6 +471,7 @@ FString UCirrovaVehicleComponent::GetWheelDebugText(int32 WheelIndex) const
 		State.FrictionForceLimit,
 		State.SlipRatio,
 		State.SlipAngleDegrees,
+		State.RelaxedSlipAngleDegrees,
 		State.SurfaceSpeed,
 		State.EffectiveInertia,
 		State.TireLongitudinalForce,
@@ -682,6 +731,7 @@ void UCirrovaVehicleComponent::ConsumeAsyncOutput(const FCirrovaVehicleOutput& I
 		Target.ContactLateralSpeed = Source.ContactLateralSpeed;
 		Target.SlipRatio = Source.SlipRatio;
 		Target.SlipAngleDegrees = Source.SlipAngleDegrees;
+		Target.RelaxedSlipAngleDegrees = Source.RelaxedSlipAngleDegrees;
 		Target.SuspensionAxis = Source.SuspensionAxis;
 		Target.ContactPoint = Source.ContactPoint;
 		Target.ContactNormal = Source.ContactNormal;
@@ -691,10 +741,73 @@ void UCirrovaVehicleComponent::ConsumeAsyncOutput(const FCirrovaVehicleOutput& I
 		Target.GroundVelocity = Source.GroundVelocity;
 	}
 
+	// P0 不变量：遥测非有限值，以及原生悬挂请求与生效状态的一致性。
+	if (!bWarnedNonFiniteTelemetry)
+	{
+		for (int32 Index = 0; Index < In.Wheels.Num(); ++Index)
+		{
+			const FCirrovaWheelOutput& Wheel = In.Wheels[Index];
+			if (!FMath::IsFinite(Wheel.Omega)
+				|| !FMath::IsFinite(Wheel.SuspensionLength)
+				|| !FMath::IsFinite(Wheel.NormalLoad)
+				|| !FMath::IsFinite(Wheel.TireLongitudinalForce)
+				|| !FMath::IsFinite(Wheel.TireLateralForce)
+				|| !FMath::IsFinite(Wheel.SlipRatio)
+				|| !FMath::IsFinite(Wheel.SlipAngleDegrees))
+			{
+				bWarnedNonFiniteTelemetry = true;
+				UE_LOG(
+					LogCirrova,
+					Error,
+					TEXT("Cirrova P0：车轮 %d 遥测出现非有限值，物理链路存在 NaN/Inf。"),
+					Index
+				);
+				break;
+			}
+		}
+	}
+	if (bUseNativeSuspension && In.bTireConstraintCoupling && !bWarnedNativeSuspensionInactive)
+	{
+		for (int32 Index = 0; Index < In.Wheels.Num(); ++Index)
+		{
+			const FCirrovaWheelOutput& Wheel = In.Wheels[Index];
+			if (Wheel.bInContact
+				&& !Wheel.bNativeSuspensionActive
+				&& !Wheel.bGroundProxyUnsupported)
+			{
+				bWarnedNativeSuspensionInactive = true;
+				UE_LOG(
+					LogCirrova,
+					Warning,
+					TEXT("Cirrova P0：车轮 %d 接地但原生悬挂未生效，且地面代理类型兼容；请检查约束创建与目标更新日志。"),
+					Index
+				);
+				break;
+			}
+		}
+	}
+
 	bDebugTireConstraintCoupling = In.bTireConstraintCoupling;
 	DebugAppliedSubsteps = In.AppliedSubsteps;
 	DebugSolverDeltaTime = In.SolverDeltaTime;
 	bDebugSubstepBudgetExceeded = In.bSubstepBudgetExceeded;
+
+	// 地面代理不被原生悬挂约束支持时告警一次，说明已逐轮改用射线弹簧力。
+	if (!bWarnedGroundProxyFallback)
+	{
+		for (int32 Index = 0; Index < In.Wheels.Num(); ++Index)
+		{
+			if (!In.Wheels[Index].bGroundProxyUnsupported) { continue; }
+			bWarnedGroundProxyFallback = true;
+			UE_LOG(
+				LogCirrova,
+				Warning,
+				TEXT("Cirrova 载具组件：车轮 %d 的地面不是单粒子物理代理，原生悬挂约束无法作用，已改用射线弹簧力（轮胎仍为求解器约束）。"),
+				Index
+			);
+			break;
+		}
+	}
 
 	// 双重支撑诊断：接地但四轮持续无载荷，说明悬挂未承载，车体由其它碰撞体支撑。
 	bool bAnyWheelLoaded = false;
@@ -825,6 +938,20 @@ bool UCirrovaVehicleComponent::ValidateConfiguration(FString& OutError) const
 		return Fail(TEXT("轮胎附着、侧向刚度、载荷敏感、参考载荷与滚动阻力参数无效"));
 	}
 
+	if (!FMath::IsFinite(TireRelaxationLength) || TireRelaxationLength < 0.0f
+		|| !FMath::IsFinite(CenterDifferentialMaxTorque) || CenterDifferentialMaxTorque < 0.0f
+		|| !FMath::IsFinite(CenterAxleInertia) || CenterAxleInertia < 0.0f
+		|| !FMath::IsFinite(AirDensity) || AirDensity <= 0.0f
+		|| !FMath::IsFinite(DragCoefficient) || DragCoefficient < 0.0f
+		|| !FMath::IsFinite(FrontalArea) || FrontalArea < 0.0f
+		|| !FMath::IsFinite(DownforceCoefficient) || DownforceCoefficient < 0.0f
+		|| !FMath::IsFinite(AeroCenterOfPressure.X)
+		|| !FMath::IsFinite(AeroCenterOfPressure.Y)
+		|| !FMath::IsFinite(AeroCenterOfPressure.Z))
+	{
+		return Fail(TEXT("轮胎松弛、中央差速与空气动力学参数无效"));
+	}
+
 	if (!FMath::IsFinite(MaxSteeringAngle) || MaxSteeringAngle < 0.0f) { return Fail(TEXT("最大转向角必须为非负有限值")); }
 
 	for (int32 Index = 0; Index < WheelConfigs.Num(); ++Index)
@@ -944,13 +1071,30 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 	Runtime.TireReferenceLoad = TireReferenceLoad;
 	Runtime.TireRollingResistance = TireRollingResistance;
 	Runtime.WheelInertia = WheelInertia;
+	Runtime.bUseSphereContactProbe = bUseSphereContactProbe;
+	Runtime.bAllowPhysicsSleep = bAllowPhysicsSleep;
+	Runtime.TireRelaxationLength = TireRelaxationLength;
+	Runtime.bEnableAerodynamics = bEnableAerodynamics;
+	Runtime.AeroAirDensity = AirDensity;
+	Runtime.AeroDragCoefficient = DragCoefficient;
+	Runtime.AeroFrontalArea = FrontalArea;
+	Runtime.AeroDownforceCoefficient = DownforceCoefficient;
+	Runtime.AeroCenterOfPressure = AeroCenterOfPressure;
 	BuildAntiRollBars(Runtime);
+
+	UE_LOG(
+		LogCirrova,
+		Log,
+		TEXT("Cirrova 载具组件：接触检测=%s，轮胎松弛长度 %.2f m，空气动力学=%s。"),
+		bUseSphereContactProbe ? TEXT("球体扫掠") : TEXT("零厚度射线"),
+		TireRelaxationLength,
+		bEnableAerodynamics ? TEXT("启用") : TEXT("关闭")
+	);
 
 	uint64 Cockpit = 0;
 	uint64 Chassis = 0;
 	uint64 Engine = 0;
 	uint64 Gearbox = 0;
-	uint64 Distributor = 0;
 	uint64 SteeringSplitter = 0;
 	uint64 BrakeSplitter = 0;
 
@@ -1005,25 +1149,126 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 		GearboxInertia,
 		&Gearbox
 	);
-	if (bUseDifferential)
+	// 按挂点前后坐标划分前/后轴（UE +X 为前）。
+	TArray<int32> FrontWheels;
+	TArray<int32> RearWheels;
+	for (int32 Index = 0; Index < WheelCount; ++Index)
 	{
-		liminal_vehicle_add_differential(
-			Runtime.Handle,
-			static_cast<size_t>(WheelCount),
-			DifferentialMaxTorque,
-			AxleInertia,
-			&Distributor
+		if (WheelConfigs[Index].MountLocation.X >= 0.0f) { FrontWheels.Add(Index); }
+		else { RearWheels.Add(Index); }
+	}
+
+	UE_LOG(
+		LogCirrova,
+		Log,
+		TEXT("Cirrova 载具组件：驱动布局 %s，前轴 %d 轮，后轴 %d 轮。"),
+		DriveLayout == ECirrovaDriveLayout::FWD
+			? TEXT("前驱")
+			: (DriveLayout == ECirrovaDriveLayout::RWD ? TEXT("后驱") : TEXT("四驱")),
+		FrontWheels.Num(),
+		RearWheels.Num()
+	);
+
+	bool bDriveFront = DriveLayout != ECirrovaDriveLayout::RWD && !FrontWheels.IsEmpty();
+	bool bDriveRear = DriveLayout != ECirrovaDriveLayout::FWD && !RearWheels.IsEmpty();
+	// 所选布局没有对应车轴时回退到存在的车轴，避免动力链断开。
+	if (!bDriveFront && !bDriveRear)
+	{
+		bDriveFront = !FrontWheels.IsEmpty();
+		bDriveRear = !RearWheels.IsEmpty();
+		UE_LOG(
+			LogCirrova,
+			Warning,
+			TEXT("Cirrova 载具组件：驱动布局没有匹配的车轴，已回退到 %s。"),
+			bDriveFront && bDriveRear ? TEXT("四驱") : (bDriveFront ? TEXT("前驱") : TEXT("后驱"))
 		);
 	}
-	else
+
+	auto AddDriveUnit = [this, &Runtime](
+		int32 OutputCount,
+		float MaxTorque,
+		float Inertia,
+		uint64& OutNode
+	) -> bool
 	{
-		liminal_vehicle_add_axle(
-			Runtime.Handle,
-			static_cast<size_t>(WheelCount),
-			AxleInertia,
-			&Distributor
-		);
+		if (OutputCount <= 0) { return false; }
+		const ELiminalStatus Status = bUseDifferential
+			? liminal_vehicle_add_differential(
+				Runtime.Handle,
+				static_cast<size_t>(OutputCount),
+				MaxTorque,
+				Inertia,
+				&OutNode)
+			: liminal_vehicle_add_axle(
+				Runtime.Handle,
+				static_cast<size_t>(OutputCount),
+				Inertia,
+				&OutNode);
+		return Status == ELiminalStatus::Ok;
+	};
+
+	uint64 FrontAxle = 0;
+	uint64 RearAxle = 0;
+	if (bDriveFront && !AddDriveUnit(FrontWheels.Num(), DifferentialMaxTorque, AxleInertia, FrontAxle))
+	{
+		return false;
 	}
+	if (bDriveRear && !AddDriveUnit(RearWheels.Num(), DifferentialMaxTorque, AxleInertia, RearAxle))
+	{
+		return false;
+	}
+
+	uint64 DriveInput = 0;
+	if (bDriveFront && bDriveRear)
+	{
+		uint64 CenterDrive = 0;
+		if (!AddDriveUnit(2, CenterDifferentialMaxTorque, CenterAxleInertia, CenterDrive)
+			|| !Connect(
+				Runtime.Handle,
+				PortOf(Runtime.Handle, CenterDrive, 1),
+				PortOf(Runtime.Handle, FrontAxle, 0))
+			|| !Connect(
+				Runtime.Handle,
+				PortOf(Runtime.Handle, CenterDrive, 2),
+				PortOf(Runtime.Handle, RearAxle, 0)))
+		{
+			return false;
+		}
+		DriveInput = PortOf(Runtime.Handle, CenterDrive, 0);
+	}
+	else if (bDriveFront)
+	{
+		DriveInput = PortOf(Runtime.Handle, FrontAxle, 0);
+	}
+	else if (bDriveRear)
+	{
+		DriveInput = PortOf(Runtime.Handle, RearAxle, 0);
+	}
+	if (DriveInput == 0) { return false; }
+
+	// 逐轮驱动端口：未驱动车轮仅保留转向节制动连接。
+	TArray<uint64> WheelDrivePorts;
+	WheelDrivePorts.Init(0, WheelCount);
+	auto AssignAxleOutputs = [this, &Runtime, &WheelDrivePorts](
+		const TArray<int32>& Group,
+		uint64 Axle
+	) -> bool
+	{
+		for (int32 OutputIndex = 0; OutputIndex < Group.Num(); ++OutputIndex)
+		{
+			const uint64 Port = PortOf(
+				Runtime.Handle,
+				Axle,
+				static_cast<uint32>(OutputIndex) + 1
+			);
+			if (Port == 0) { return false; }
+			WheelDrivePorts[Group[OutputIndex]] = Port;
+		}
+		return true;
+	};
+	if (bDriveFront && !AssignAxleOutputs(FrontWheels, FrontAxle)) { return false; }
+	if (bDriveRear && !AssignAxleOutputs(RearWheels, RearAxle)) { return false; }
+
 	liminal_vehicle_add_splitter(Runtime.Handle, static_cast<size_t>(WheelCount), &SteeringSplitter);
 	liminal_vehicle_add_splitter(Runtime.Handle, static_cast<size_t>(WheelCount), &BrakeSplitter);
 
@@ -1041,9 +1286,9 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 		return false;
 	}
 
-	// 动力链：发动机 → 变速箱 → 轮轴/差速器。
+	// 动力链：发动机 → 变速箱 → 驱动轴/中央差速器。
 	if (!Connect(Runtime.Handle, PortOf(Runtime.Handle, Engine, 1), PortOf(Runtime.Handle, Gearbox, 1))
-		|| !Connect(Runtime.Handle, PortOf(Runtime.Handle, Gearbox, 2), PortOf(Runtime.Handle, Distributor, 0)))
+		|| !Connect(Runtime.Handle, PortOf(Runtime.Handle, Gearbox, 2), DriveInput))
 	{
 		return false;
 	}
@@ -1084,12 +1329,14 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 		if (!Connect(Runtime.Handle, PortOf(Runtime.Handle, Chassis, Index), PortOf(Runtime.Handle, Suspension, 0))
 			|| !Connect(Runtime.Handle, PortOf(Runtime.Handle, Suspension, 1), PortOf(Runtime.Handle, Knuckle, 0))
 			|| !Connect(Runtime.Handle, PortOf(Runtime.Handle, Knuckle, 1), PortOf(Runtime.Handle, Wheel, 1))
-			|| !Connect(
-				Runtime.Handle,
-				PortOf(Runtime.Handle, Distributor, static_cast<uint32>(Index) + 1),
-				PortOf(Runtime.Handle, Wheel, 0)
-			)
 			|| !Connect(Runtime.Handle, PortOf(Runtime.Handle, Knuckle, 4), PortOf(Runtime.Handle, Wheel, 0)))
+		{
+			return false;
+		}
+
+		// 驱动轮才连接轮轴/差速器输出；非驱动轮仅由转向节制动与车轮惯量构成独立岛。
+		if (WheelDrivePorts[Index] != 0
+			&& !Connect(Runtime.Handle, WheelDrivePorts[Index], PortOf(Runtime.Handle, Wheel, 0)))
 		{
 			return false;
 		}

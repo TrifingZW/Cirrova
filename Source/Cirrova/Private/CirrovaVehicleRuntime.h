@@ -54,6 +54,11 @@ struct FCirrovaWheelRuntime
 	float ConstraintLength = 0.0f;
 	bool bConstraintLengthValid = false;
 
+	// 原生悬挂约束上一物理步的世界空间位置修正（kg·cm），用于还原真实支撑力。
+	FVector ConstraintPushOut = FVector::ZeroVector;
+	FVector ConstraintHardStopPushOut = FVector::ZeroVector;
+	bool bConstraintPushOutValid = false;
+
 	// 上一步压缩量（m）。
 	float PreviousCompression = 0.0f;
 
@@ -110,6 +115,10 @@ struct FCirrovaWheelRuntime
 	float SlipRatio = 0.0f;
 	float SurfaceSpeed = 0.0f;
 
+	// 侧向松弛：一阶过滤后的侧偏角（rad）与初始化标志。
+	float RelaxedSlipAngleRad = 0.0f;
+	bool bRelaxationInitialized = false;
+
 	// 压缩速度（m/s）与钳制标志。
 	float CompressionVelocity = 0.0f;
 	bool bCompressionVelocityClamped = false;
@@ -143,6 +152,9 @@ struct FCirrovaWheelRuntime
 
 	// 本步射线命中的地面物理代理（非拥有指针）。
 	IPhysicsProxyBase* GroundProxy = nullptr;
+
+	// 地面代理是否可被原生悬挂约束使用（引擎只接受单粒子代理）。
+	bool bGroundSupportsConstraint = false;
 };
 
 /** 防倾杆运行态：成对车轮的附加法向力，物理线程读写。 */
@@ -173,16 +185,34 @@ struct FCirrovaVehicleRuntime
 
 	float ChassisMass = 0.0f;
 
-	// 轮胎以求解器约束耦合；容器不可用或悬挂未使用原生约束时为 false。
+	// 轮胎以求解器约束耦合；容器不可用时为 false（与原生悬挂开关解耦）。
 	bool bUseTireConstraint = false;
+
+	// 允许底盘休眠；false 时物理线程每步保持唤醒。
+	bool bAllowPhysicsSleep = true;
 
 	// 本步耦合诊断：外力回退的内部子步数、求解器步长与轮胎约束形态。
 	int32 AppliedSubsteps = 1;
 	float SolverDeltaTime = 0.0f;
 	bool bTireConstraintCoupling = false;
+	bool bSubstepBudgetExceeded = false;
 
 	// 最大转向角（弧度）。
 	float MaxSteeringAngle = 0.0f;
+
+	// 接触检测使用球体扫掠（半径 = 车轮半径）；否则为零厚度射线。
+	bool bUseSphereContactProbe = true;
+
+	// 轮胎侧向松弛长度（m）；0 关闭。
+	float TireRelaxationLength = 0.3f;
+
+	// 空气动力学：阻力与下压力（SI）。
+	bool bEnableAerodynamics = true;
+	float AeroAirDensity = 1.225f;
+	float AeroDragCoefficient = 0.35f;
+	float AeroFrontalArea = 2.2f;
+	float AeroDownforceCoefficient = 0.8f;
+	FVector AeroCenterOfPressure = FVector::ZeroVector;
 
 	float TireFriction = 1.0f;
 	float TireLateralStiffness = 0.0f;
@@ -227,6 +257,7 @@ struct FCirrovaWheelOutput
 	float CompressionVelocity = 0.0f;
 	bool bCompressionVelocityClamped = false;
 	bool bNativeSuspensionActive = false;
+	bool bGroundProxyUnsupported = false;
 	bool bUsingConstraintLength = false;
 	float SuspensionConstraintLength = 0.0f;
 	float TireLongitudinalForce = 0.0f;
@@ -244,6 +275,7 @@ struct FCirrovaWheelOutput
 	float ContactLateralSpeed = 0.0f;
 	float SlipRatio = 0.0f;
 	float SlipAngleDegrees = 0.0f;
+	float RelaxedSlipAngleDegrees = 0.0f;
 	FVector SuspensionAxis = FVector::UpVector;
 	FVector ContactPoint = FVector::ZeroVector;
 	FVector ContactNormal = FVector::UpVector;

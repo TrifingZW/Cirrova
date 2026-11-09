@@ -128,6 +128,9 @@ public:
 
 	int32 NumConstraints() const { return Slots.Num(); }
 
+	// 仍绑定粒子的约束数量。
+	int32 NumActiveConstraints() const;
+
 	// FPBDConstraintContainer 接口。
 	virtual int32 GetNumConstraints() const override final { return NumConstraints(); }
 	virtual void ResetConstraints() override final {}

@@ -1,3 +1,3 @@
 #include "CirrovaLog.h"
 
-DEFINE_LOG_CATEGORY(LogCirrova);
+CIRROVA_API DEFINE_LOG_CATEGORY(LogCirrova);
