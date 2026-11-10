@@ -14,9 +14,11 @@ struct FCirrovaTestVehicleSetup
 	FVector ChassisExtentCm = FVector(200.0f, 100.0f, 50.0f);
 	float ChassisMassKg = 1000.0f;
 	ECirrovaDriveLayout DriveLayout = ECirrovaDriveLayout::AWD;
-	bool bUseSphereContactProbe = true;
+	ECirrovaWheelProbeMode ProbeMode = ECirrovaWheelProbeMode::Cylinder;
 	bool bUseNativeSuspension = true;
 	float TireRelaxationLength = 0.3f;
+	float TireLateralFrictionScale = 1.0f;
+	float TireStaticFrictionScale = 1.0f;
 	bool bEnableAerodynamics = true;
 	bool bUseBaselineSuspension = false;
 	bool bUseProgressiveSuspension = false;
@@ -77,13 +79,19 @@ private:
 	ECirrovaDriveLayout DriveLayout = ECirrovaDriveLayout::AWD;
 
 	UPROPERTY()
-	bool bUseSphereContactProbe = true;
+	ECirrovaWheelProbeMode ProbeMode = ECirrovaWheelProbeMode::Cylinder;
 
 	UPROPERTY()
 	bool bUseNativeSuspension = true;
 
 	UPROPERTY()
 	float TireRelaxationLength = 0.3f;
+
+	UPROPERTY()
+	float TireLateralFrictionScale = 1.0f;
+
+	UPROPERTY()
+	float TireStaticFrictionScale = 1.0f;
 
 	UPROPERTY()
 	bool bEnableAerodynamics = true;

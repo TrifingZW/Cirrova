@@ -216,7 +216,7 @@ namespace
 
 #pragma region T2 制动锁止
 
-	/** T2：60 km/h 直线全制动，验证摩擦圆与停止行为。 */
+	/** T2：60 km/h 直线全制动，验证摩擦椭圆界与停止行为。 */
 	class FT2BrakingScenario final : public FCirrovaTestScenario
 	{
 	public:
@@ -282,7 +282,7 @@ namespace
 				if (WheelStat.Count <= 0) { continue; }
 
 				AddCheck(WheelStat.MaxUtilization <= 1.02f, FString::Printf(TEXT("车轮 %d 最大摩擦利用 %.3f"), WheelIndex, WheelStat.MaxUtilization));
-				AddCheck(WheelStat.MaxAbsLongitudinalForce <= WheelStat.MaxFrictionLimit * 1.05f + 10.0f, FString::Printf(TEXT("车轮 %d 纵向力 %.0f N 超出摩擦圆 %.0f N"), WheelIndex, WheelStat.MaxAbsLongitudinalForce, WheelStat.MaxFrictionLimit));
+				AddCheck(WheelStat.MaxAbsLongitudinalForce <= WheelStat.MaxFrictionLimit * 1.05f + 10.0f, FString::Printf(TEXT("车轮 %d 纵向力 %.0f N 超出纵向界 %.0f N"), WheelIndex, WheelStat.MaxAbsLongitudinalForce, WheelStat.MaxFrictionLimit));
 
 				const FWheelStat EarlyBraking = ComputeWheelStat(Samples, WheelIndex, 3.1, 5.0);
 				AddCheck(EarlyBraking.MeanLongitudinalForce < -200.0f, FString::Printf(TEXT("车轮 %d 平均制动力 %.0f N"), WheelIndex, EarlyBraking.MeanLongitudinalForce));

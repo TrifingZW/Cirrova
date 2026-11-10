@@ -39,10 +39,12 @@ void ACirrovaTestVehicle::PostInitializeComponents()
 	Chassis->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
 
 	Vehicle->DriveLayout = DriveLayout;
-	Vehicle->bUseSphereContactProbe = bUseSphereContactProbe;
+	Vehicle->WheelProbeMode = ProbeMode;
 	Vehicle->bUseNativeSuspension = bUseNativeSuspension;
 	Vehicle->bAllowPhysicsSleep = false;
 	Vehicle->TireRelaxationLength = TireRelaxationLength;
+	Vehicle->TireLateralFrictionScale = TireLateralFrictionScale;
+	Vehicle->TireStaticFrictionScale = TireStaticFrictionScale;
 	Vehicle->bEnableAerodynamics = bEnableAerodynamics;
 
 	if (bUseBaselineSuspension)
@@ -87,9 +89,11 @@ void ACirrovaTestVehicle::Configure(const FCirrovaTestVehicleSetup& InSetup)
 	ChassisExtentCm = InSetup.ChassisExtentCm;
 	ChassisMassKg = InSetup.ChassisMassKg;
 	DriveLayout = InSetup.DriveLayout;
-	bUseSphereContactProbe = InSetup.bUseSphereContactProbe;
+	ProbeMode = InSetup.ProbeMode;
 	bUseNativeSuspension = InSetup.bUseNativeSuspension;
 	TireRelaxationLength = InSetup.TireRelaxationLength;
+	TireLateralFrictionScale = InSetup.TireLateralFrictionScale;
+	TireStaticFrictionScale = InSetup.TireStaticFrictionScale;
 	bEnableAerodynamics = InSetup.bEnableAerodynamics;
 	bUseBaselineSuspension = InSetup.bUseBaselineSuspension;
 	bUseProgressiveSuspension = InSetup.bUseProgressiveSuspension;

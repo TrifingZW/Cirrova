@@ -279,7 +279,7 @@ namespace
 						MaxLimit = FMath::Max(MaxLimit, Wheel.FrictionForceLimit);
 					}
 				}
-				AddCheck(MaxLateral <= MaxLimit * 1.05f + 20.0f, FString::Printf(TEXT("v%d 侧向力 %.0f N 超出摩擦圆 %.0f N"), Index, MaxLateral, MaxLimit));
+				AddCheck(MaxLateral <= MaxLimit * 1.05f + 20.0f, FString::Printf(TEXT("v%d 侧向力 %.0f N 超出侧向界 %.0f N"), Index, MaxLateral, MaxLimit));
 
 				AddMetric(VehicleMetricName(Index, TEXT("lag_s")), Lag[Index]);
 				AddMetric(VehicleMetricName(Index, TEXT("force_rise_s")), ForceRise[Index]);
@@ -542,6 +542,354 @@ namespace
 	};
 
 #pragma endregion
+
+#pragma region T12 纵向松弛
+
+	/** T12：静止全油门对比 0 / 0.3 / 1.0 m 纵向松弛的力建立时间。 */
+	class FT12LongitudinalRelaxationScenario final : public FCirrovaTestScenario
+	{
+	public:
+		FT12LongitudinalRelaxationScenario() : FCirrovaTestScenario(TEXT("T12"), 30.0f) {}
+
+	protected:
+		void OnBegin(FCirrovaTestHarness& Harness) override
+		{
+			const FTransform Ground = Harness.MakeFlatGround(Harness.GetTestOrigin());
+			Harness.SpawnGround(Ground);
+
+			const float Relaxation[3] = {0.0f, 0.3f, 1.0f};
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				FCirrovaTestVehicleSetup Setup;
+				Setup.TireRelaxationLength = Relaxation[Index];
+				Setup.ProbeMode = ECirrovaWheelProbeMode::Cylinder;
+				Harness.SpawnVehicle(
+					Harness.MakeVehicleOnGround(Ground, 0.02f, 0.0f, (Index - 1) * 40.0f),
+					Setup
+				);
+				Harness.SetVehicleLabel(Index, FString::Printf(TEXT("long_relax_%.1f"), Relaxation[Index]));
+			}
+		}
+
+		void OnTick(FCirrovaTestHarness& Harness, float) override
+		{
+			if (!bLaunched && Elapsed >= 2.5f)
+			{
+				bLaunched = true;
+				for (int32 Index = 0; Index < 3; ++Index)
+				{
+					if (ACirrovaTestVehicle* Vehicle = Harness.GetVehicle(Index))
+					{
+						Vehicle->SetInputs(1.0f, 0.0f, 0.0f, 1);
+					}
+				}
+			}
+
+			if (Elapsed < 6.0f) { return; }
+
+			float Rise[3] = {0.0f, 0.0f, 0.0f};
+			float PeakForce[3] = {0.0f, 0.0f, 0.0f};
+			float MaxSlip[3] = {0.0f, 0.0f, 0.0f};
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				const TArray<FCirrovaTestVehicleSample>& Samples = Harness.GetSamples(Index);
+				if (Samples.IsEmpty()) { continue; }
+
+				const FVehicleStat Stat = ComputeVehicleStat(Samples, 2.5, Samples.Last().Time, FVector::UpVector);
+				AddCheck(Stat.bAllFinite, VehicleMetricName(Index, TEXT("non_finite")));
+
+				auto AverageLongitudinalForce = [](const FCirrovaTestVehicleSample& Sample)
+				{
+					float Sum = 0.0f;
+					int32 Count = 0;
+					for (const FCirrovaWheelState& Wheel : Sample.Wheels)
+					{
+						if (!Wheel.bInContact) { continue; }
+						Sum += Wheel.TireLongitudinalForce;
+						++Count;
+					}
+					return Count > 0 ? Sum / static_cast<float>(Count) : 0.0f;
+				};
+
+				for (const FCirrovaTestVehicleSample& Sample : Samples)
+				{
+					if (Sample.Time < 2.5) { continue; }
+					PeakForce[Index] = FMath::Max(PeakForce[Index], AverageLongitudinalForce(Sample));
+					for (const FCirrovaWheelState& Wheel : Sample.Wheels)
+					{
+						MaxSlip[Index] = FMath::Max(MaxSlip[Index], Wheel.SlipRatio);
+					}
+				}
+
+				Rise[Index] = -1.0f;
+				if (PeakForce[Index] > 100.0f)
+				{
+					for (const FCirrovaTestVehicleSample& Sample : Samples)
+					{
+						if (Sample.Time < 2.5) { continue; }
+						if (AverageLongitudinalForce(Sample) >= PeakForce[Index] * 0.9f)
+						{
+							Rise[Index] = static_cast<float>(Sample.Time - 2.5);
+							break;
+						}
+					}
+				}
+
+				AddCheck(PeakForce[Index] > 100.0f, FString::Printf(TEXT("v%d 纵向力未建立（峰值 %.0f N）"), Index, PeakForce[Index]));
+				AddCheck(Rise[Index] >= 0.0f, VehicleMetricName(Index, TEXT("longitudinal_force_not_built")));
+				AddCheck(MaxSlip[Index] > 0.01f, FString::Printf(TEXT("v%d 未产生可测纵向滑移（峰值 %.3f）"), Index, MaxSlip[Index]));
+				AddMetric(VehicleMetricName(Index, TEXT("force_rise_s")), Rise[Index]);
+				AddMetric(VehicleMetricName(Index, TEXT("peak_long_force_n")), PeakForce[Index]);
+				AddMetric(VehicleMetricName(Index, TEXT("max_slip_ratio")), MaxSlip[Index]);
+			}
+
+			AddCheck(Rise[1] >= Rise[0] - 0.02f, TEXT("0.3 m 纵向松弛的力建立不慢于 0 m"));
+			AddCheck(Rise[2] >= Rise[1] - 0.02f, TEXT("1.0 m 纵向松弛的力建立不慢于 0.3 m"));
+			AddCheck(Rise[2] - Rise[0] > 0.03f, TEXT("1.0 m 纵向松弛相对 0 m 没有可测量的滞后"));
+
+			Complete(TEXT("纵向松弛阶跃响应单调且无发散"));
+		}
+
+	private:
+		bool bLaunched = false;
+	};
+
+#pragma endregion
+
+#pragma region T13 地面材质
+
+	/** T13：1.0 / 0.6 / 0.35 地面动摩擦，验证材质查询与制动距离排序。 */
+	class FT13SurfaceFrictionScenario final : public FCirrovaTestScenario
+	{
+	public:
+		FT13SurfaceFrictionScenario() : FCirrovaTestScenario(TEXT("T13"), 30.0f) {}
+
+	protected:
+		void OnBegin(FCirrovaTestHarness& Harness) override
+		{
+			const float Frictions[3] = {1.0f, 0.6f, 0.35f};
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				const FVector Center = Harness.GetTestOrigin() + FVector(0.0f, Index * 50000.0f, 0.0f);
+				const FTransform Ground = Harness.MakeFlatGround(Center);
+				Harness.SpawnGround(Ground, Frictions[Index], Frictions[Index]);
+
+				FCirrovaTestVehicleSetup Setup;
+				Setup.ProbeMode = ECirrovaWheelProbeMode::Cylinder;
+				Harness.SpawnVehicle(Harness.MakeVehicleOnGround(Ground, 0.02f), Setup);
+				Harness.SetVehicleLabel(Index, FString::Printf(TEXT("surface_%.2f"), Frictions[Index]));
+			}
+		}
+
+		void OnTick(FCirrovaTestHarness& Harness, float) override
+		{
+			if (!bLaunched && Elapsed >= 2.0f)
+			{
+				bLaunched = true;
+				for (int32 Index = 0; Index < 3; ++Index)
+				{
+					if (ACirrovaTestVehicle* Vehicle = Harness.GetVehicle(Index))
+					{
+						SetHeldVelocity(Vehicle, Vehicle->GetActorForwardVector(), 20.0f);
+						Vehicle->SetInputs(0.0f, 0.0f, 0.0f, 0);
+					}
+				}
+			}
+			if (!bBraked && Elapsed >= 2.5f)
+			{
+				bBraked = true;
+				for (int32 Index = 0; Index < 3; ++Index)
+				{
+					if (ACirrovaTestVehicle* Vehicle = Harness.GetVehicle(Index))
+					{
+						Vehicle->SetInputs(0.0f, 0.0f, 1.0f, 0);
+					}
+				}
+			}
+
+			if (Elapsed < 9.0f) { return; }
+
+			const float ExpectedFrictions[3] = {1.0f, 0.6f, 0.35f};
+			float Distance[3] = {0.0f, 0.0f, 0.0f};
+			float Limit[3] = {0.0f, 0.0f, 0.0f};
+			float GroundFriction[3] = {0.0f, 0.0f, 0.0f};
+			float FinalSpeed[3] = {0.0f, 0.0f, 0.0f};
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				const TArray<FCirrovaTestVehicleSample>& Samples = Harness.GetSamples(Index);
+				if (Samples.IsEmpty()) { continue; }
+
+				const double End = Samples.Last().Time;
+				const FVehicleStat Stat = ComputeVehicleStat(Samples, 2.5, End, FVector::UpVector);
+				AddCheck(Stat.bAllFinite, VehicleMetricName(Index, TEXT("non_finite")));
+				Distance[Index] = FMath::Abs(static_cast<float>(Stat.EndLocation.X - Stat.StartLocation.X)) * 0.01f;
+				FinalSpeed[Index] = static_cast<float>(Samples.Last().Velocity.Size()) * 0.01f;
+
+				float LimitSum = 0.0f;
+				float GroundSum = 0.0f;
+				int32 Count = 0;
+				for (int32 WheelIndex = 0; WheelIndex < 4; ++WheelIndex)
+				{
+					const FWheelStat WheelStat = ComputeWheelStat(Samples, WheelIndex, 5.0, End);
+					if (WheelStat.Count <= 0) { continue; }
+					LimitSum += WheelStat.MeanFrictionLimit;
+					GroundSum += WheelStat.MeanGroundFriction;
+					++Count;
+				}
+				if (Count > 0)
+				{
+					Limit[Index] = LimitSum / static_cast<float>(Count);
+					GroundFriction[Index] = GroundSum / static_cast<float>(Count);
+				}
+
+				AddCheck(FMath::Abs(GroundFriction[Index] - ExpectedFrictions[Index]) < 0.06f, FString::Printf(TEXT("v%d 地面摩擦查询 %.2f（期望 %.2f）"), Index, GroundFriction[Index], ExpectedFrictions[Index]));
+				AddCheck(FinalSpeed[Index] < 0.8f, FString::Printf(TEXT("v%d 未停止，末速 %.2f m/s"), Index, FinalSpeed[Index]));
+				AddMetric(VehicleMetricName(Index, TEXT("stop_distance_m")), Distance[Index]);
+				AddMetric(VehicleMetricName(Index, TEXT("mean_friction_limit_n")), Limit[Index]);
+				AddMetric(VehicleMetricName(Index, TEXT("ground_friction")), GroundFriction[Index]);
+				AddMetric(VehicleMetricName(Index, TEXT("final_speed_mps")), FinalSpeed[Index]);
+			}
+
+			AddCheck(Distance[1] > Distance[0] * 1.1f, FString::Printf(TEXT("0.6 地面制动距离 %.1f m 未明显长于 1.0 地面 %.1f m"), Distance[1], Distance[0]));
+			AddCheck(Distance[2] > Distance[1] * 1.1f, FString::Printf(TEXT("0.35 地面制动距离 %.1f m 未明显长于 0.6 地面 %.1f m"), Distance[2], Distance[1]));
+			AddCheck(Limit[0] > Limit[1] * 1.05f, TEXT("0.6 地面摩擦上限未低于 1.0 地面"));
+			AddCheck(Limit[1] > Limit[2] * 1.05f, TEXT("0.35 地面摩擦上限未低于 0.6 地面"));
+
+			Complete(TEXT("地面材质摩擦影响制动距离与摩擦上限"));
+		}
+
+	private:
+		bool bLaunched = false;
+		bool bBraked = false;
+	};
+
+#pragma endregion
+
+#pragma region T14 摩擦椭圆
+
+	/** T14：不同侧向附着倍率下制动转向，验证联合椭圆界与静摩擦上限。 */
+	class FT14FrictionEllipseScenario final : public FCirrovaTestScenario
+	{
+	public:
+		FT14FrictionEllipseScenario() : FCirrovaTestScenario(TEXT("T14"), 30.0f) {}
+
+	protected:
+		void OnBegin(FCirrovaTestHarness& Harness) override
+		{
+			const FTransform Ground = Harness.MakeFlatGround(Harness.GetTestOrigin());
+			Harness.SpawnGround(Ground, 1.0f, 1.2f);
+
+			const float LateralScales[3] = {1.0f, 0.5f, 0.25f};
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				FCirrovaTestVehicleSetup Setup;
+				Setup.ProbeMode = ECirrovaWheelProbeMode::Cylinder;
+				Setup.TireLateralFrictionScale = LateralScales[Index];
+				Setup.TireStaticFrictionScale = 1.2f;
+				Harness.SpawnVehicle(
+					Harness.MakeVehicleOnGround(Ground, 0.02f, 0.0f, (Index - 1) * 50.0f),
+					Setup
+				);
+				Harness.SetVehicleLabel(Index, FString::Printf(TEXT("ellipse_%.2f"), LateralScales[Index]));
+			}
+		}
+
+		void OnTick(FCirrovaTestHarness& Harness, float) override
+		{
+			if (!bLaunched && Elapsed >= 2.0f)
+			{
+				bLaunched = true;
+				for (int32 Index = 0; Index < 3; ++Index)
+				{
+					if (ACirrovaTestVehicle* Vehicle = Harness.GetVehicle(Index))
+					{
+						SetHeldVelocity(Vehicle, Vehicle->GetActorForwardVector(), 20.0f);
+						Vehicle->SetInputs(0.0f, 0.6f, 0.0f, 0);
+					}
+				}
+			}
+			if (!bBraked && Elapsed >= 3.0f)
+			{
+				bBraked = true;
+				for (int32 Index = 0; Index < 3; ++Index)
+				{
+					if (ACirrovaTestVehicle* Vehicle = Harness.GetVehicle(Index))
+					{
+						Vehicle->SetInputs(0.0f, 0.6f, 1.0f, 0);
+					}
+				}
+			}
+
+			if (Elapsed < 8.0f) { return; }
+
+			float MaxUtilization[3] = {0.0f, 0.0f, 0.0f};
+			float MeanLateralLimit[3] = {0.0f, 0.0f, 0.0f};
+			float MaxEffectiveLimit[3] = {0.0f, 0.0f, 0.0f};
+			float LastEffectiveLimit[3] = {0.0f, 0.0f, 0.0f};
+			float LastStaticLimit[3] = {0.0f, 0.0f, 0.0f};
+			float LastKineticLimit[3] = {0.0f, 0.0f, 0.0f};
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				const TArray<FCirrovaTestVehicleSample>& Samples = Harness.GetSamples(Index);
+				if (Samples.IsEmpty()) { continue; }
+
+				const FVehicleStat Stat = ComputeVehicleStat(Samples, 3.0, Samples.Last().Time, FVector::UpVector);
+				AddCheck(Stat.bAllFinite, VehicleMetricName(Index, TEXT("non_finite")));
+
+				float LateralSum = 0.0f;
+				int32 Count = 0;
+				for (const FCirrovaTestVehicleSample& Sample : Samples)
+				{
+					if (Sample.Time < 3.0) { continue; }
+					for (const FCirrovaWheelState& Wheel : Sample.Wheels)
+					{
+						if (!Wheel.bInContact) { continue; }
+						MaxUtilization[Index] = FMath::Max(MaxUtilization[Index], Wheel.FrictionUtilization);
+						if (Sample.Time <= 3.5)
+						{
+							MaxEffectiveLimit[Index] = FMath::Max(MaxEffectiveLimit[Index], Wheel.FrictionForceLimit);
+						}
+						LateralSum += Wheel.LateralForceLimit;
+						++Count;
+					}
+				}
+				if (Count > 0) { MeanLateralLimit[Index] = LateralSum / static_cast<float>(Count); }
+
+				const FCirrovaTestVehicleSample* Latest = Harness.GetLatest(Index);
+				if (Latest && !Latest->Wheels.IsEmpty())
+				{
+					LastEffectiveLimit[Index] = Latest->Wheels[0].FrictionForceLimit;
+					LastStaticLimit[Index] = Latest->Wheels[0].StaticFrictionForceLimit;
+					LastKineticLimit[Index] = Latest->Wheels[0].KineticFrictionForceLimit;
+					AddCheck(Latest->Wheels[0].GroundStaticFriction > Latest->Wheels[0].GroundFriction * 1.15f, FString::Printf(TEXT("v%d 地面静摩擦查询未高于动摩擦（静 %.2f / 动 %.2f）"), Index, Latest->Wheels[0].GroundStaticFriction, Latest->Wheels[0].GroundFriction));
+				}
+
+				AddCheck(MaxUtilization[Index] <= 1.1f, FString::Printf(TEXT("v%d 摩擦椭圆利用率 %.3f 越界"), Index, MaxUtilization[Index]));
+				AddMetric(VehicleMetricName(Index, TEXT("max_utilization")), MaxUtilization[Index]);
+				AddMetric(VehicleMetricName(Index, TEXT("mean_lateral_limit_n")), MeanLateralLimit[Index]);
+				AddMetric(VehicleMetricName(Index, TEXT("max_effective_limit_n")), MaxEffectiveLimit[Index]);
+				AddMetric(VehicleMetricName(Index, TEXT("last_effective_limit_n")), LastEffectiveLimit[Index]);
+				AddMetric(VehicleMetricName(Index, TEXT("last_static_limit_n")), LastStaticLimit[Index]);
+				AddMetric(VehicleMetricName(Index, TEXT("last_kinetic_limit_n")), LastKineticLimit[Index]);
+			}
+
+			AddCheck(MeanLateralLimit[0] > MeanLateralLimit[1] * 1.4f, TEXT("侧向附着倍率 1.0 与 0.5 未形成椭圆轴差异"));
+			AddCheck(MeanLateralLimit[1] > MeanLateralLimit[2] * 1.4f, TEXT("侧向附着倍率 0.5 与 0.25 未形成椭圆轴差异"));
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				AddCheck(LastStaticLimit[Index] > LastKineticLimit[Index] * 1.05f, FString::Printf(TEXT("v%d 静摩擦上限未高于动摩擦上限（静 %.0f / 动 %.0f）"), Index, LastStaticLimit[Index], LastKineticLimit[Index]));
+				AddCheck(LastEffectiveLimit[Index] > LastKineticLimit[Index] * 1.05f, FString::Printf(TEXT("v%d 静止时未过渡到静摩擦界（有效 %.0f / 动 %.0f）"), Index, LastEffectiveLimit[Index], LastKineticLimit[Index]));
+			}
+
+			Complete(TEXT("摩擦椭圆联合界与静摩擦过渡有效"));
+		}
+
+	private:
+		bool bLaunched = false;
+		bool bBraked = false;
+	};
+
+#pragma endregion
 }
 
 TUniquePtr<FCirrovaTestScenario> CirrovaTest::CreateDrivetrainScenario(const FString& Name)
@@ -550,5 +898,8 @@ TUniquePtr<FCirrovaTestScenario> CirrovaTest::CreateDrivetrainScenario(const FSt
 	if (Name == TEXT("T8")) { return MakeUnique<FT8RelaxationScenario>(); }
 	if (Name == TEXT("T9")) { return MakeUnique<FT9AerodynamicsScenario>(); }
 	if (Name == TEXT("T10")) { return MakeUnique<FT10MultiVehicleScenario>(); }
+	if (Name == TEXT("T12")) { return MakeUnique<FT12LongitudinalRelaxationScenario>(); }
+	if (Name == TEXT("T13")) { return MakeUnique<FT13SurfaceFrictionScenario>(); }
+	if (Name == TEXT("T14")) { return MakeUnique<FT14FrictionEllipseScenario>(); }
 	return nullptr;
 }

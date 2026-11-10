@@ -64,7 +64,11 @@ public:
 	const FString& GetOutputDir() const { return OutputDir; }
 
 	// 创建受控几何与载具；创建顺序即车辆索引。
-	ACirrovaTestGround* SpawnGround(const FTransform& Transform);
+	ACirrovaTestGround* SpawnGround(
+		const FTransform& Transform,
+		float Friction = 1.0f,
+		float StaticFriction = 1.0f
+	);
 	ACirrovaTestVehicle* SpawnVehicle(const FTransform& Transform, const FCirrovaTestVehicleSetup& Setup);
 	void DestroySpawned();
 

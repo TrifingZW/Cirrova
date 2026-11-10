@@ -26,6 +26,7 @@ namespace CirrovaTestSupport
 		float MeanAbsRelaxedAlpha = 0.0f;
 		float MeanFrictionLimit = 0.0f;
 		float MaxFrictionLimit = 0.0f;
+		float MeanGroundFriction = 0.0f;
 		float MeanUtilization = 0.0f;
 		float MaxUtilization = 0.0f;
 		float MeanAbsLateralForce = 0.0f;
@@ -90,6 +91,7 @@ namespace CirrovaTestSupport
 			Stat.MeanAbsRelaxedAlpha += FMath::Abs(Wheel.RelaxedSlipAngleDegrees);
 			Stat.MeanFrictionLimit += Wheel.FrictionForceLimit;
 			Stat.MaxFrictionLimit = FMath::Max(Stat.MaxFrictionLimit, Wheel.FrictionForceLimit);
+			Stat.MeanGroundFriction += Wheel.GroundFriction;
 			Stat.MeanUtilization += Wheel.FrictionUtilization;
 			Stat.MaxUtilization = FMath::Max(Stat.MaxUtilization, Wheel.FrictionUtilization);
 			Stat.MeanAbsLateralForce += FMath::Abs(Wheel.TireLateralForce);
@@ -117,6 +119,7 @@ namespace CirrovaTestSupport
 		Stat.MeanAbsAlpha *= InvCount;
 		Stat.MeanAbsRelaxedAlpha *= InvCount;
 		Stat.MeanFrictionLimit *= InvCount;
+		Stat.MeanGroundFriction *= InvCount;
 		Stat.MeanUtilization *= InvCount;
 		Stat.MeanAbsLateralForce *= InvCount;
 		Stat.MeanLongitudinalForce *= InvCount;

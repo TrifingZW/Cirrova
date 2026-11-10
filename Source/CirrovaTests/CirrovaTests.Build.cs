@@ -17,7 +17,8 @@ public class CirrovaTests : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(
 			[
-				"Json"
+				"Json",
+				"PhysicsCore"
 			]
 		);
 	}

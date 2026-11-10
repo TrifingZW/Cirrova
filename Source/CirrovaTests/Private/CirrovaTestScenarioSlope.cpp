@@ -207,7 +207,7 @@ namespace
 
 #pragma region T6 台阶
 
-	/** T6：10/15 cm 台阶，10/40 km/h，球体扫掠与射线对照。 */
+	/** T6：10/15 cm 台阶，10/40 km/h，圆柱包络/球体扫掠与射线对照。 */
 	class FT6StepScenario final : public FCirrovaTestScenario
 	{
 	public:
@@ -222,16 +222,26 @@ namespace
 
 			const float Heights[2] = {0.10f, 0.15f};
 			const float Speeds[2] = {10.0f, 40.0f};
+			const TCHAR* ProbeNames[3] = {TEXT("cylinder"), TEXT("sphere"), TEXT("ray")};
+			const ECirrovaWheelProbeMode ProbeModes[3] = {
+				ECirrovaWheelProbeMode::Cylinder,
+				ECirrovaWheelProbeMode::Sphere,
+				ECirrovaWheelProbeMode::Ray
+			};
+			constexpr int32 ProbeCount = 3;
+			constexpr int32 TotalVehicles = 2 * 2 * ProbeCount;
+			constexpr float LaneSpacingM = 15.0f;
 			for (int32 HeightIndex = 0; HeightIndex < 2; ++HeightIndex)
 			{
 				for (int32 SpeedIndex = 0; SpeedIndex < 2; ++SpeedIndex)
 				{
-					for (int32 ProbeIndex = 0; ProbeIndex < 2; ++ProbeIndex)
+					for (int32 ProbeIndex = 0; ProbeIndex < ProbeCount; ++ProbeIndex)
 					{
-						const int32 Index = HeightIndex * 4 + SpeedIndex * 2 + ProbeIndex;
-						const float LaneY = (static_cast<float>(Index) - 3.5f) * 20.0f;
+						const int32 Index = HeightIndex * (2 * ProbeCount) + SpeedIndex * ProbeCount + ProbeIndex;
+						const float LaneY =
+							(static_cast<float>(Index) - (TotalVehicles - 1) * 0.5f) * LaneSpacingM;
 						const float HeightCm = Heights[HeightIndex] * 100.0f;
-						const bool bSphere = ProbeIndex == 0;
+						const bool bEnforced = ProbeIndex != 2;
 
 						// 台阶必须与测试地面在同一世界位置；测试原点远离默认关卡出生点。
 						Harness.SpawnGround(Harness.MakeBox(
@@ -241,17 +251,17 @@ namespace
 
 						FCirrovaTestVehicleSetup Setup;
 						Setup.ChassisExtentCm = FVector(160.0f, 90.0f, 35.0f);
-						Setup.bUseSphereContactProbe = bSphere;
+						Setup.ProbeMode = ProbeModes[ProbeIndex];
 						Harness.SpawnVehicle(Harness.MakeVehicleOnGround(Ground, 0.02f, -8.0f, LaneY), Setup);
 						Harness.SetVehicleLabel(
 							Index,
-							FString::Printf(TEXT("h%02.0f_v%02.0f_%s"), Heights[HeightIndex] * 100.0f, Speeds[SpeedIndex], bSphere ? TEXT("sphere") : TEXT("ray"))
+							FString::Printf(TEXT("h%02.0f_v%02.0f_%s"), Heights[HeightIndex] * 100.0f, Speeds[SpeedIndex], ProbeNames[ProbeIndex])
 						);
 
 						LaneYs.Add(LaneY);
 						StepHeights.Add(Heights[HeightIndex]);
 						SpeedsMps.Add(Speeds[SpeedIndex] / 3.6f);
-						bSpheres.Add(bSphere);
+						bEnforcedModes.Add(bEnforced);
 					}
 				}
 			}
@@ -278,7 +288,7 @@ namespace
 			{
 				const TArray<FCirrovaTestVehicleSample>& Samples = Harness.GetSamples(Index);
 				if (Samples.IsEmpty() || !LaneYs.IsValidIndex(Index) || !StepHeights.IsValidIndex(Index)
-					|| !bSpheres.IsValidIndex(Index))
+					|| !bEnforcedModes.IsValidIndex(Index))
 				{
 					continue;
 				}
@@ -318,7 +328,7 @@ namespace
 				AddMetric(VehicleMetricName(Index, TEXT("max_vz_mps")), Stat.MaxAbsVerticalSpeed);
 				AddMetric(VehicleMetricName(Index, TEXT("min_up_dot")), Stat.MinUpDot);
 
-				if (!bSpheres[Index])
+				if (!bEnforcedModes[Index])
 				{
 					// 射线组为对照组：只记录，不作为 P0 通过条件。
 					continue;
@@ -330,7 +340,7 @@ namespace
 				AddCheck(MaxPenetration <= 0.05f, FString::Printf(TEXT("v%d 底盘穿透台阶 %.3f m"), Index, MaxPenetration));
 			}
 
-			Complete(TEXT("台阶通过（球体扫掠判定，射线为对照）"));
+			Complete(TEXT("台阶通过（圆柱包络/球体扫掠判定，射线为对照）"));
 		}
 
 	private:
@@ -339,7 +349,7 @@ namespace
 		TArray<float> LaneYs;
 		TArray<float> StepHeights;
 		TArray<float> SpeedsMps;
-		TArray<bool> bSpheres;
+		TArray<bool> bEnforcedModes;
 	};
 
 #pragma endregion

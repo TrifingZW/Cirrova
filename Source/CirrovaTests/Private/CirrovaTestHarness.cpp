@@ -33,6 +33,8 @@ namespace
 	{
 		return FMath::IsFinite(Wheel.Omega)
 			&& FMath::IsFinite(Wheel.SurfaceSpeed)
+			&& FMath::IsFinite(Wheel.EffectiveInertia)
+			&& FMath::IsFinite(Wheel.ConstraintWheelInverseMass)
 			&& FMath::IsFinite(Wheel.SuspensionLength)
 			&& FMath::IsFinite(Wheel.Compression)
 			&& FMath::IsFinite(Wheel.CompressionVelocity)
@@ -43,12 +45,30 @@ namespace
 			&& FMath::IsFinite(Wheel.TireLateralForce)
 			&& FMath::IsFinite(Wheel.WheelTorque)
 			&& FMath::IsFinite(Wheel.RollingResistance)
+			&& FMath::IsFinite(Wheel.LongitudinalImpulse)
+			&& FMath::IsFinite(Wheel.LateralImpulse)
+			&& FMath::IsFinite(Wheel.ImpulseWindow)
+			&& FMath::IsFinite(Wheel.ContactLongitudinalSpeed)
+			&& FMath::IsFinite(Wheel.ContactLateralSpeed)
 			&& FMath::IsFinite(Wheel.FrictionForceLimit)
 			&& FMath::IsFinite(Wheel.LateralForceLimit)
+			&& FMath::IsFinite(Wheel.StaticFrictionForceLimit)
+			&& FMath::IsFinite(Wheel.StaticLateralForceLimit)
+			&& FMath::IsFinite(Wheel.KineticFrictionForceLimit)
+			&& FMath::IsFinite(Wheel.KineticLateralForceLimit)
+			&& FMath::IsFinite(Wheel.GroundFriction)
+			&& FMath::IsFinite(Wheel.GroundStaticFriction)
+			&& FMath::IsFinite(Wheel.RelaxedSurfaceSpeed)
 			&& FMath::IsFinite(Wheel.FrictionUtilization)
 			&& FMath::IsFinite(Wheel.SlipRatio)
 			&& FMath::IsFinite(Wheel.SlipAngleDegrees)
-			&& FMath::IsFinite(Wheel.RelaxedSlipAngleDegrees);
+			&& FMath::IsFinite(Wheel.RelaxedSlipAngleDegrees)
+			&& IsFiniteVector(Wheel.ContactPoint)
+			&& IsFiniteVector(Wheel.ContactNormal)
+			&& IsFiniteVector(Wheel.LongitudinalAxis)
+			&& IsFiniteVector(Wheel.LateralAxis)
+			&& IsFiniteVector(Wheel.ContactVelocity)
+			&& IsFiniteVector(Wheel.GroundVelocity);
 	}
 
 	FString SanitizeFileStem(const FString& Name)
@@ -97,7 +117,11 @@ FCirrovaTestHarness::FCirrovaTestHarness(UWorld* InWorld, FString InOutputDir)
 
 FCirrovaTestHarness::~FCirrovaTestHarness() { EndCase(); }
 
-ACirrovaTestGround* FCirrovaTestHarness::SpawnGround(const FTransform& Transform)
+ACirrovaTestGround* FCirrovaTestHarness::SpawnGround(
+	const FTransform& Transform,
+	const float Friction,
+	const float StaticFriction
+)
 {
 	if (!World) { return nullptr; }
 
@@ -110,6 +134,7 @@ ACirrovaTestGround* FCirrovaTestHarness::SpawnGround(const FTransform& Transform
 	);
 	if (!Ground) { return nullptr; }
 
+	Ground->ConfigureSurface(Friction, StaticFriction);
 	Ground->FinishSpawning(Transform);
 	SpawnedActors.Add(Ground);
 	return Ground;
@@ -251,7 +276,7 @@ void FCirrovaTestHarness::Tick(const float DeltaTime)
 		{
 			const FCirrovaWheelState& Wheel = Latest.Wheels[WheelIndex];
 			TArray<FString> Fields;
-			Fields.Reserve(3 + 22 + 28);
+			Fields.Reserve(3 + 22 + 35);
 			Fields.Add(FString::Printf(TEXT("%.4f"), Time));
 			Fields.Add(Pose);
 			Fields.Add(FString::Printf(TEXT("%d"), WheelIndex));
@@ -282,6 +307,13 @@ void FCirrovaTestHarness::Tick(const float DeltaTime)
 			AppendFloat(Fields, Wheel.LateralImpulse);
 			AppendFloat(Fields, Wheel.ImpulseWindow);
 			AppendFloat(Fields, Wheel.ConstraintWheelInverseMass);
+			AppendFloat(Fields, Wheel.StaticFrictionForceLimit);
+			AppendFloat(Fields, Wheel.StaticLateralForceLimit);
+			AppendFloat(Fields, Wheel.KineticFrictionForceLimit);
+			AppendFloat(Fields, Wheel.KineticLateralForceLimit);
+			AppendFloat(Fields, Wheel.GroundFriction);
+			AppendFloat(Fields, Wheel.GroundStaticFriction);
+			AppendFloat(Fields, Wheel.RelaxedSurfaceSpeed);
 
 			const FString Line = FString::Join(Fields, TEXT(",")) + TEXT("\r\n");
 			FTCHARToUTF8 Utf8(*Line);
@@ -335,7 +367,9 @@ void FCirrovaTestHarness::BeginCase(const FString& InCaseName)
 		"slip_ratio,slip_angle_deg,relaxed_slip_angle_deg,fx_n,fy_n,omega_rad_s,surface_speed_m_s,"
 		"effective_inertia,friction_limit_n,lateral_limit_n,util,native_active,using_constraint_length,"
 		"constraint_length_m,antiroll_n,rolling_n,tire_constraint_applied,"
-		"long_impulse_ns,lat_impulse_ns,impulse_window_s,constraint_wheel_inv_mass_1_kg\r\n"
+		"long_impulse_ns,lat_impulse_ns,impulse_window_s,constraint_wheel_inv_mass_1_kg,"
+		"static_friction_limit_n,static_lateral_limit_n,kinetic_friction_limit_n,kinetic_lateral_limit_n,"
+		"ground_friction,ground_static_friction,relaxed_surface_speed_m_s\r\n"
 	);
 	FTCHARToUTF8 Utf8(*Header);
 	CsvFile->Serialize(reinterpret_cast<uint8*>(const_cast<ANSICHAR*>(Utf8.Get())), Utf8.Length());

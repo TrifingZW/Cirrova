@@ -91,7 +91,10 @@ void CirrovaTest::GetScenarioNames(TArray<FString>& OutNames)
 		TEXT("T8"),
 		TEXT("T9"),
 		TEXT("T10"),
-		TEXT("T11")
+		TEXT("T11"),
+		TEXT("T12"),
+		TEXT("T13"),
+		TEXT("T14")
 	};
 }
 
