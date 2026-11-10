@@ -51,6 +51,13 @@ namespace
 		Chaos::FSolverReal AdditionalInverseMass = Chaos::FSolverReal(0)
 	)
 	{
+		if (!FMath::IsFinite(TargetSpeed)
+			|| !FMath::IsFinite(MaxImpulse)
+			|| MaxImpulse < Chaos::FSolverReal(0))
+		{
+			return;
+		}
+
 		const Chaos::FSolverVec3 Arm = ContactPoint - ToSolverVector(Body.CorrectedP());
 		const Chaos::FSolverVec3 ArmCrossAxis = Chaos::FSolverVec3::CrossProduct(Arm, Axis);
 		const Chaos::FSolverReal InverseMass =
@@ -63,6 +70,7 @@ namespace
 		const Chaos::FSolverVec3 PointVelocity =
 			Body.V() + Chaos::FSolverVec3::CrossProduct(Body.W(), Arm);
 		const Chaos::FSolverReal CurrentSpeed = Chaos::FSolverVec3::DotProduct(PointVelocity, Axis);
+		if (!FMath::IsFinite(CurrentSpeed)) { return; }
 
 		const Chaos::FSolverReal Desired = Accumulated + (TargetSpeed - CurrentSpeed) / InverseMass;
 		const Chaos::FSolverReal Clamped = FMath::Clamp(Desired, -MaxImpulse, MaxImpulse);
@@ -73,6 +81,35 @@ namespace
 		const Chaos::FSolverVec3 Impulse = Axis * Applied;
 		Body.ApplyLinearVelocityDelta(Impulse * Body.InvM());
 		Body.ApplyAngularVelocityDelta(Body.InvI() * Chaos::FSolverVec3::CrossProduct(Arm, Impulse));
+	}
+
+	/**
+	 * 摩擦椭圆单轴可用冲量：另一轴冲量占用椭圆后，本轴剩余的半轴长度。
+	 *
+	 * 椭圆方程 `(x/LimitX)² + (y/LimitY)² = 1`；任一轴界非正时退化为单轴约束。
+	 */
+	Chaos::FSolverReal EllipseAxisBound(
+		const Chaos::FSolverReal AxisLimit,
+		const Chaos::FSolverReal OtherLimit,
+		const Chaos::FSolverReal OtherImpulse
+	)
+	{
+		if (!FMath::IsFinite(AxisLimit) || AxisLimit <= Chaos::FSolverReal(0))
+		{
+			return Chaos::FSolverReal(0);
+		}
+		if (!FMath::IsFinite(OtherLimit) || OtherLimit <= Chaos::FSolverReal(0))
+		{
+			return AxisLimit;
+		}
+		if (!FMath::IsFinite(OtherImpulse)) { return AxisLimit; }
+
+		const Chaos::FSolverReal Ratio = FMath::Clamp(
+			FMath::Abs(OtherImpulse) / OtherLimit,
+			Chaos::FSolverReal(0),
+			Chaos::FSolverReal(1)
+		);
+		return AxisLimit * FMath::Sqrt(Chaos::FSolverReal(1) - Ratio * Ratio);
 	}
 }
 
@@ -449,8 +486,9 @@ void FCirrovaWheelFrictionConstraints::GatherSingle(int32 ConstraintIndex, float
 	FSlot& Slot = Slots[ConstraintIndex];
 	Slot.AccumulatedLongitudinal = 0.0f;
 	Slot.AccumulatedLateral = 0.0f;
-	Slot.MaxLongitudinalImpulse = Slot.Settings.FrictionForceLimit * Dt;
-	Slot.MaxLateralImpulse = Slot.Settings.LateralForceLimit * Dt;
+	const float SafeDt = FMath::IsFinite(Dt) && Dt > 0.0f ? Dt : 0.0f;
+	Slot.MaxLongitudinalImpulse = Slot.Settings.LongitudinalForceLimit * SafeDt;
+	Slot.MaxLateralImpulse = Slot.Settings.LateralForceLimit * SafeDt;
 
 	// 轮端自由度消元：R²/J（cm² / (kg·cm²) = 1/kg）。制动锁止时按 0 处理。
 	const float RadiusCm = Slot.Settings.WheelRadiusCm;
@@ -489,7 +527,7 @@ void FCirrovaWheelFrictionConstraints::ScatterSingle(int32 ConstraintIndex, floa
 	FSlot& Slot = Slots[ConstraintIndex];
 	Slot.FrameResults.LongitudinalImpulse += Slot.AccumulatedLongitudinal;
 	Slot.FrameResults.LateralImpulse += Slot.AccumulatedLateral;
-	Slot.FrameResults.FrameDeltaTime += Dt;
+	if (FMath::IsFinite(Dt) && Dt > 0.0f) { Slot.FrameResults.FrameDeltaTime += Dt; }
 	Slot.SolverBody = nullptr;
 }
 
@@ -534,37 +572,54 @@ void FCirrovaWheelFrictionConstraints::ApplySingle(int32 ConstraintIndex)
 	const Chaos::FSolverReal LateralTarget =
 		Chaos::FSolverVec3::DotProduct(GroundVelocity, LateralAxis);
 
-	Chaos::FSolverReal AccumulatedLongitudinal =
-		static_cast<Chaos::FSolverReal>(Slot.AccumulatedLongitudinal);
-	SolveAxis(
-		*Body,
-		ContactPoint,
-		LongitudinalAxis,
-		LongitudinalTarget,
+	const Chaos::FSolverReal LimitX = FMath::Max(
 		static_cast<Chaos::FSolverReal>(Slot.MaxLongitudinalImpulse),
-		AccumulatedLongitudinal,
-		static_cast<Chaos::FSolverReal>(Slot.WheelInverseMass)
-	);
-	Slot.AccumulatedLongitudinal = static_cast<float>(AccumulatedLongitudinal);
-
-	// 摩擦圆：侧向冲量只能使用纵向求解后剩余的圆界。
-	const Chaos::FSolverReal Circle = static_cast<Chaos::FSolverReal>(Slot.MaxLongitudinalImpulse);
-	const Chaos::FSolverReal Used = FMath::Abs(AccumulatedLongitudinal);
-	const Chaos::FSolverReal Remaining = FMath::Sqrt(FMath::Max(Chaos::FSolverReal(0), Circle * Circle - Used * Used));
-	const Chaos::FSolverReal LateralBound = FMath::Min(
-		static_cast<Chaos::FSolverReal>(Slot.MaxLateralImpulse),
-		Remaining
-	);
-
-	Chaos::FSolverReal AccumulatedLateral = static_cast<Chaos::FSolverReal>(Slot.AccumulatedLateral);
-	SolveAxis(
-		*Body,
-		ContactPoint,
-		LateralAxis,
-		LateralTarget,
-		LateralBound,
-		AccumulatedLateral,
 		Chaos::FSolverReal(0)
 	);
+	const Chaos::FSolverReal LimitY = FMath::Max(
+		static_cast<Chaos::FSolverReal>(Slot.MaxLateralImpulse),
+		Chaos::FSolverReal(0)
+	);
+	Chaos::FSolverReal AccumulatedLongitudinal =
+		static_cast<Chaos::FSolverReal>(Slot.AccumulatedLongitudinal);
+	Chaos::FSolverReal AccumulatedLateral =
+		static_cast<Chaos::FSolverReal>(Slot.AccumulatedLateral);
+
+	// 摩擦椭圆：坐标块迭代求交。每轴可用界由另一轴当前冲量在椭圆上的剩余量决定，
+	// 纵向先求解，侧向跟随；多次往返使累计冲量收敛到椭圆内。
+	constexpr int32 AxisIterations = 3;
+	for (int32 Iteration = 0; Iteration < AxisIterations; ++Iteration)
+	{
+		const Chaos::FSolverReal LongitudinalBound = EllipseAxisBound(
+			LimitX,
+			LimitY,
+			AccumulatedLateral
+		);
+		SolveAxis(
+			*Body,
+			ContactPoint,
+			LongitudinalAxis,
+			LongitudinalTarget,
+			LongitudinalBound,
+			AccumulatedLongitudinal,
+			static_cast<Chaos::FSolverReal>(Slot.WheelInverseMass)
+		);
+
+		const Chaos::FSolverReal LateralBound = EllipseAxisBound(
+			LimitY,
+			LimitX,
+			AccumulatedLongitudinal
+		);
+		SolveAxis(
+			*Body,
+			ContactPoint,
+			LateralAxis,
+			LateralTarget,
+			LateralBound,
+			AccumulatedLateral,
+			Chaos::FSolverReal(0)
+		);
+	}
+	Slot.AccumulatedLongitudinal = static_cast<float>(AccumulatedLongitudinal);
 	Slot.AccumulatedLateral = static_cast<float>(AccumulatedLateral);
 }

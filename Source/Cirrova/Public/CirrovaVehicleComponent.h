@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "CirrovaLiminalApi.h"
+#include "CirrovaTypes.h"
 #include "Components/ActorComponent.h"
 #include "Engine/EngineTypes.h"
 #include "CirrovaVehicleComponent.generated.h"
@@ -230,7 +231,7 @@ struct FCirrovaWheelState
 	)
 	float AntiRollForce = 0.0f;
 
-	// 轮胎摩擦圆使用的总法向载荷（N）。
+	// 轮胎摩擦椭圆使用的总法向载荷（N）。
 	UPROPERTY(
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|遥测",
@@ -266,7 +267,7 @@ struct FCirrovaWheelState
 
 #pragma region 轮胎
 
-	// 摩擦圆内的轮胎纵向力（N），不含滚动阻力。
+	// 摩擦椭圆内的轮胎纵向力（N），不含滚动阻力。
 	UPROPERTY(
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|遥测",
@@ -274,7 +275,7 @@ struct FCirrovaWheelState
 	)
 	float TireLongitudinalForce = 0.0f;
 
-	// 摩擦圆内的轮胎侧向力（N）。
+	// 摩擦椭圆内的轮胎侧向力（N）。
 	UPROPERTY(
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|遥测",
@@ -298,15 +299,15 @@ struct FCirrovaWheelState
 	)
 	float RollingResistance = 0.0f;
 
-	// 载荷敏感后的摩擦圆上限（N）。
+	// 载荷敏感与地面材质合并后的纵向摩擦上限（N）。
 	UPROPERTY(
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|遥测",
-		meta = (DisplayName = "摩擦圆上限 (N)")
+		meta = (DisplayName = "纵向摩擦上限 (N)")
 	)
 	float FrictionForceLimit = 0.0f;
 
-	// 轮胎模型给出的侧向力界（N）。
+	// 载荷敏感与地面材质合并后的侧向摩擦上限（N）。
 	UPROPERTY(
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|遥测",
@@ -314,11 +315,67 @@ struct FCirrovaWheelState
 	)
 	float LateralForceLimit = 0.0f;
 
-	// 摩擦圆利用率：hypot(纵向力, 侧向力) / 摩擦圆上限。
+	// 低速/静止时使用的纵向静摩擦上限（N）。
 	UPROPERTY(
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|遥测",
-		meta = (DisplayName = "摩擦圆利用率")
+		meta = (DisplayName = "纵向静摩擦上限 (N)")
+	)
+	float StaticFrictionForceLimit = 0.0f;
+
+	// 低速/静止时使用的侧向静摩擦上限（N）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "侧向静摩擦上限 (N)")
+	)
+	float StaticLateralForceLimit = 0.0f;
+
+	// 载荷敏感与地面材质合并后的纵向动摩擦上限（N）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "纵向动摩擦上限 (N)")
+	)
+	float KineticFrictionForceLimit = 0.0f;
+
+	// 载荷敏感与地面材质合并后的侧向动摩擦上限（N）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "侧向动摩擦上限 (N)")
+	)
+	float KineticLateralForceLimit = 0.0f;
+
+	// 接触地面材质的动摩擦系数；无材质时回退 1。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "地面动摩擦系数")
+	)
+	float GroundFriction = 1.0f;
+
+	// 接触地面材质的静摩擦系数；无效时回退动摩擦。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "地面静摩擦系数")
+	)
+	float GroundStaticFriction = 1.0f;
+
+	// 纵向松弛后的轮面线速度（m/s），约束目标使用。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "纵向松弛轮面速度 (m/s)")
+	)
+	float RelaxedSurfaceSpeed = 0.0f;
+
+	// 摩擦椭圆利用率：sqrt((Fx/FxMax)² + (Fy/FyMax)²)。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "摩擦椭圆利用率")
 	)
 	float FrictionUtilization = 0.0f;
 
@@ -415,6 +472,15 @@ struct FCirrovaWheelConfig
 		meta = (DisplayName = "车轮半径")
 	)
 	float Radius = 35.0f;
+
+	// 车轮宽度（m），圆柱包络使用。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|车轮",
+		meta = (DisplayName = "车轮宽度 (m)")
+	)
+	float WheelWidth = 0.25f;
 
 	// 是否参与转向。
 	UPROPERTY(
@@ -777,14 +843,14 @@ public:
 	)
 	float MaxBrakeTorque = 2000.0f;
 
-	// 使用球体扫掠接触检测（扫掠半径 = 车轮半径）；关闭则使用零厚度射线。
+	// 车轮接触检测探针：射线、球体扫掠或圆柱包络。
 	UPROPERTY(
 		EditAnywhere,
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|车轮",
-		meta = (DisplayName = "球体接触扫掠")
+		meta = (DisplayName = "车轮接触探针")
 	)
-	bool bUseSphereContactProbe = true;
+	ECirrovaWheelProbeMode WheelProbeMode = ECirrovaWheelProbeMode::Cylinder;
 
 	// 使用 Chaos 原生悬挂约束（默认物理路径）；轮胎求解器约束独立于该开关。仅初始化时读取，运行时修改不生效。
 	UPROPERTY(
@@ -821,6 +887,24 @@ public:
 		meta = (DisplayName = "轮胎附着系数")
 	)
 	float TireFriction = 1.0f;
+
+	// 侧向附着系数相对纵向的倍率，构造摩擦椭圆；1 为等轴圆。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|轮胎",
+		meta = (DisplayName = "侧向附着倍率")
+	)
+	float TireLateralFrictionScale = 1.0f;
+
+	// 静摩擦相对动摩擦的倍率；低速/静止时提高附着，上限 2。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|轮胎",
+		meta = (DisplayName = "静摩擦倍率")
+	)
+	float TireStaticFrictionScale = 1.0f;
 
 	// 轮胎侧向刚度（N/rad）。
 	UPROPERTY(

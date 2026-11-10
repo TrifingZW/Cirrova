@@ -6,7 +6,7 @@
 
 // liminal C ABI 绑定，与 ThirdParty/liminal/src/capi.rs 一一对应。
 // 修改任何结构体布局或函数签名时须同步递增 LiminalAbiVersion 与 Rust 侧常量。
-constexpr uint32 LiminalAbiVersion = 2;
+constexpr uint32 LiminalAbiVersion = 3;
 // 契约见 ThirdParty/liminal/docs/adapter-contract.md。
 // 使用前须先构建 Rust 静态库：cd ThirdParty/liminal && cargo build --release。
 
@@ -48,22 +48,30 @@ struct FLiminalTireForces
 	float WheelTorque;
 };
 
-// 轮胎模型参数：载荷敏感与滚动阻力非正值时关闭。
+// 轮胎模型参数：载荷敏感与滚动阻力非正值时关闭；静摩擦倍率非正值按 1 处理。
 struct FLiminalTireModel
 {
 	float FrictionCoefficient;
+	float LateralFrictionCoefficient;
 	float LateralStiffness;
 	float LoadSensitivity;
 	float ReferenceLoad;
 	float RollingResistance;
+	float StaticFrictionScale;
 };
 
-// 约束式轮胎耦合的力界与外部力（N）。
+// 约束式轮胎耦合的摩擦椭圆界与外部力（N）。
 struct FLiminalTireConstraint
 {
-	// 载荷敏感后的摩擦圆上限，作为纵向与侧向冲量的共同界。
-	float FrictionForce;
-	// 侧向力（含低速速度阻尼，已按摩擦圆裁剪）。
+	// 纵向动摩擦上限（椭圆长轴界）。
+	float LongitudinalLimit;
+	// 侧向动摩擦上限（椭圆短轴界）。
+	float LateralLimit;
+	// 纵向静摩擦上限（低速/静止过渡）。
+	float StaticLongitudinalLimit;
+	// 侧向静摩擦上限（低速/静止过渡）。
+	float StaticLateralLimit;
+	// 侧向力（含低速速度阻尼，已按侧向动摩擦界裁剪）。
 	float LateralForce;
 	// 滚动阻力（逆向地面速度，不产生车轮反作用）。
 	float RollingForce;
@@ -129,8 +137,8 @@ using FLiminalVehicleHandle = void*;
 // 布局校验：Rust 侧为 #[repr(C)]，字段偏移必须与 C++ 侧一致。
 static_assert(sizeof(FLiminalVec3) == 12, "FLiminalVec3 布局漂移");
 static_assert(sizeof(FLiminalTireForces) == 12, "FLiminalTireForces 布局漂移");
-static_assert(sizeof(FLiminalTireModel) == 20, "FLiminalTireModel 布局漂移");
-static_assert(sizeof(FLiminalTireConstraint) == 12, "FLiminalTireConstraint 布局漂移");
+static_assert(sizeof(FLiminalTireModel) == 28, "FLiminalTireModel 布局漂移");
+static_assert(sizeof(FLiminalTireConstraint) == 24, "FLiminalTireConstraint 布局漂移");
 static_assert(sizeof(FLiminalJointDesc) == 36, "FLiminalJointDesc 布局漂移");
 static_assert(sizeof(FLiminalEngineCurvePoint) == 8, "FLiminalEngineCurvePoint 布局漂移");
 static_assert(sizeof(FLiminalFrame) == 28, "FLiminalFrame 布局漂移");

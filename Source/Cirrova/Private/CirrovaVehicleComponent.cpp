@@ -460,8 +460,8 @@ FString UCirrovaVehicleComponent::GetWheelDebugText(int32 WheelIndex) const
 	return FString::Printf(
 		TEXT("轮 %d %s  耦合:%s  悬挂:%s\n")
 		TEXT("弹簧 %.3f m  约束 %.3f m  压缩 %.3f m  压缩速度 %.2f m/s%s\n")
-		TEXT("法向载荷 %.0f N  悬挂力 %.0f N  防倾 %.0f N  摩擦圆 %.0f N\n")
-		TEXT("滑移率 %.3f  侧偏角 %.1f°（松弛 %.1f°） 轮面 %.2f m/s  惯量 %.2f kg·m²\n")
+		TEXT("法向载荷 %.0f N  悬挂力 %.0f N  防倾 %.0f N  摩擦椭圆 有效 %.0f/%.0f N（静 %.0f/%.0f，动 %.0f/%.0f）\n")
+		TEXT("地面摩擦 %.2f/%.2f  滑移率 %.3f  侧偏角 %.1f°（松弛 %.1f°） 轮面 %.2f m/s  惯量 %.2f kg·m²\n")
 		TEXT("轮胎力 纵 %.0f N 侧 %.0f N  力矩 %.0f N·m  滚动 %.0f N\n")
 		TEXT("摩擦利用 %.2f  冲量 纵 %.2f / 侧 %.2f N·s（窗口 %.1f ms）"),
 		WheelIndex,
@@ -477,6 +477,13 @@ FString UCirrovaVehicleComponent::GetWheelDebugText(int32 WheelIndex) const
 		State.SuspensionForce,
 		State.AntiRollForce,
 		State.FrictionForceLimit,
+		State.LateralForceLimit,
+		State.StaticFrictionForceLimit,
+		State.StaticLateralForceLimit,
+		State.KineticFrictionForceLimit,
+		State.KineticLateralForceLimit,
+		State.GroundFriction,
+		State.GroundStaticFriction,
 		State.SlipRatio,
 		State.SlipAngleDegrees,
 		State.RelaxedSlipAngleDegrees,
@@ -733,6 +740,13 @@ void UCirrovaVehicleComponent::ConsumeAsyncOutput(const FCirrovaVehicleOutput& I
 		Target.RollingResistance = Source.RollingResistance;
 		Target.FrictionForceLimit = Source.FrictionForceLimit;
 		Target.LateralForceLimit = Source.LateralForceLimit;
+		Target.StaticFrictionForceLimit = Source.StaticFrictionForceLimit;
+		Target.StaticLateralForceLimit = Source.StaticLateralForceLimit;
+		Target.KineticFrictionForceLimit = Source.KineticFrictionForceLimit;
+		Target.KineticLateralForceLimit = Source.KineticLateralForceLimit;
+		Target.GroundFriction = Source.GroundFriction;
+		Target.GroundStaticFriction = Source.GroundStaticFriction;
+		Target.RelaxedSurfaceSpeed = Source.RelaxedSurfaceSpeed;
 		Target.FrictionUtilization = Source.FrictionUtilization;
 		Target.bTireConstraintApplied = Source.bTireConstraintApplied;
 		Target.LongitudinalImpulse = Source.LongitudinalImpulse;
@@ -763,6 +777,16 @@ void UCirrovaVehicleComponent::ConsumeAsyncOutput(const FCirrovaVehicleOutput& I
 				|| !FMath::IsFinite(Wheel.NormalLoad)
 				|| !FMath::IsFinite(Wheel.TireLongitudinalForce)
 				|| !FMath::IsFinite(Wheel.TireLateralForce)
+				|| !FMath::IsFinite(Wheel.FrictionForceLimit)
+				|| !FMath::IsFinite(Wheel.LateralForceLimit)
+				|| !FMath::IsFinite(Wheel.StaticFrictionForceLimit)
+				|| !FMath::IsFinite(Wheel.StaticLateralForceLimit)
+				|| !FMath::IsFinite(Wheel.KineticFrictionForceLimit)
+				|| !FMath::IsFinite(Wheel.KineticLateralForceLimit)
+				|| !FMath::IsFinite(Wheel.GroundFriction)
+				|| !FMath::IsFinite(Wheel.GroundStaticFriction)
+				|| !FMath::IsFinite(Wheel.RelaxedSurfaceSpeed)
+				|| !FMath::IsFinite(Wheel.FrictionUtilization)
 				|| !FMath::IsFinite(Wheel.SlipRatio)
 				|| !FMath::IsFinite(Wheel.SlipAngleDegrees))
 			{
@@ -941,12 +965,16 @@ bool UCirrovaVehicleComponent::ValidateConfiguration(FString& OutError) const
 	}
 
 	if (!FMath::IsFinite(TireFriction) || TireFriction < 0.0f
+		|| !FMath::IsFinite(TireLateralFrictionScale) || TireLateralFrictionScale <= 0.0f
+		|| TireLateralFrictionScale > 2.0f
+		|| !FMath::IsFinite(TireStaticFrictionScale) || TireStaticFrictionScale <= 0.0f
+		|| TireStaticFrictionScale > 2.0f
 		|| !FMath::IsFinite(TireLateralStiffness) || TireLateralStiffness < 0.0f
 		|| !FMath::IsFinite(TireLoadSensitivity) || TireLoadSensitivity < 0.0f
 		|| !FMath::IsFinite(TireReferenceLoad) || TireReferenceLoad <= 0.0f
 		|| !FMath::IsFinite(TireRollingResistance) || TireRollingResistance < 0.0f)
 	{
-		return Fail(TEXT("轮胎附着、侧向刚度、载荷敏感、参考载荷与滚动阻力参数无效"));
+		return Fail(TEXT("轮胎附着、侧向/静摩擦倍率、侧向刚度、载荷敏感、参考载荷与滚动阻力参数无效"));
 	}
 
 	if (!FMath::IsFinite(TireRelaxationLength) || TireRelaxationLength < 0.0f
@@ -977,6 +1005,10 @@ bool UCirrovaVehicleComponent::ValidateConfiguration(FString& OutError) const
 		if (!FMath::IsFinite(Config.Radius) || Config.Radius <= 0.0f)
 		{
 			return Fail(FString::Printf(TEXT("车轮 %d 的半径必须为正有限值"), Index));
+		}
+		if (!FMath::IsFinite(Config.WheelWidth) || Config.WheelWidth <= 0.0f)
+		{
+			return Fail(FString::Printf(TEXT("车轮 %d 的宽度必须为正有限值"), Index));
 		}
 		if (!FMath::IsFinite(Config.SuspensionStiffness) || Config.SuspensionStiffness <= 0.0f
 			|| !FMath::IsFinite(Config.SuspensionDamping) || Config.SuspensionDamping < 0.0f)
@@ -1094,13 +1126,15 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 	Runtime.ChassisMass = ChassisPrimitive.IsValid() ? ChassisPrimitive->GetMass() : 0.0f;
 	Runtime.MaxSteeringAngle = FMath::DegreesToRadians(MaxSteeringAngle);
 	Runtime.TireFriction = TireFriction;
+	Runtime.TireLateralFrictionScale = TireLateralFrictionScale;
+	Runtime.TireStaticFrictionScale = TireStaticFrictionScale;
 	Runtime.TireLateralStiffness = TireLateralStiffness;
 	Runtime.TireLoadSensitivity = TireLoadSensitivity;
 	Runtime.TireReferenceLoad = TireReferenceLoad;
 	Runtime.TireRollingResistance = TireRollingResistance;
 	Runtime.WheelInertia = WheelInertia;
 	Runtime.MaxBrakeTorque = MaxBrakeTorque;
-	Runtime.bUseSphereContactProbe = bUseSphereContactProbe;
+	Runtime.WheelProbeMode = WheelProbeMode;
 	Runtime.bAllowPhysicsSleep = bAllowPhysicsSleep;
 	Runtime.TireRelaxationLength = TireRelaxationLength;
 	Runtime.bEnableAerodynamics = bEnableAerodynamics;
@@ -1115,7 +1149,9 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 		LogCirrova,
 		Log,
 		TEXT("Cirrova 载具组件：接触检测=%s，轮胎松弛长度 %.2f m，空气动力学=%s。"),
-		bUseSphereContactProbe ? TEXT("球体扫掠") : TEXT("零厚度射线"),
+		WheelProbeMode == ECirrovaWheelProbeMode::Cylinder
+			? TEXT("圆柱包络")
+			: (WheelProbeMode == ECirrovaWheelProbeMode::Sphere ? TEXT("球体扫掠") : TEXT("零厚度射线")),
 		TireRelaxationLength,
 		bEnableAerodynamics ? TEXT("启用") : TEXT("关闭")
 	);
@@ -1540,6 +1576,7 @@ bool UCirrovaVehicleComponent::ReadSpatialLinks(
 			return false;
 		}
 		Wheel.Radius = WheelConfigs[Index].Radius * 0.01f;
+		Wheel.WheelWidth = WheelConfigs[Index].WheelWidth;
 		Wheel.bSteerable = WheelConfigs[Index].bSteerable;
 		Wheel.CurrentLength = Wheel.RestLength;
 		Wheel.RaycastLength = Wheel.RestLength;

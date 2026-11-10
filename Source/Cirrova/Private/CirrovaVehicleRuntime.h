@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "CirrovaLiminalApi.h"
+#include "CirrovaTypes.h"
 #include "Chaos/ChaosEngineInterface.h"
 #include "Chaos/PhysicsObject.h"
 
@@ -56,6 +57,9 @@ struct FCirrovaWheelRuntime
 
 	// 车轮半径（m）。
 	float Radius = 0.35f;
+
+	// 车轮宽度（m），圆柱包络使用。
+	float WheelWidth = 0.25f;
 
 	// 当前弹簧长度（m）。
 	float CurrentLength = 0.0f;
@@ -147,11 +151,23 @@ struct FCirrovaWheelRuntime
 	float TireFrictionLateral = 0.0f;
 	float WheelTorque = 0.0f;
 
-	// 摩擦圆上限（N）、侧向界（N）与利用率；约束模式下与摩擦力求值对齐。
+	// 载荷敏感与地面材质合并后的纵/侧向摩擦界（N）与椭圆利用率。
 	float FrictionForceLimit = 0.0f;
 	float PendingFrictionForceLimit = 0.0f;
 	float LateralForceLimit = 0.0f;
+	float StaticFrictionForceLimit = 0.0f;
+	float StaticLateralForceLimit = 0.0f;
+	float KineticFrictionForceLimit = 0.0f;
+	float KineticLateralForceLimit = 0.0f;
 	float FrictionUtilization = 0.0f;
+
+	// 接触地面材质的动/静摩擦系数；无材质时均为 1。
+	float GroundFriction = 1.0f;
+	float GroundStaticFriction = 1.0f;
+
+	// 纵向松弛后的轮面线速度（m/s）与初始化标志。
+	float RelaxedSurfaceSpeed = 0.0f;
+	bool bLongitudinalRelaxationInitialized = false;
 
 	// 该轮本步是否以轮胎约束进入求解器。
 	bool bTireConstraintApplied = false;
@@ -265,10 +281,10 @@ struct FCirrovaVehicleRuntime
 	// 最大转向角（弧度）。
 	float MaxSteeringAngle = 0.0f;
 
-	// 接触检测使用球体扫掠（半径 = 车轮半径）；否则为零厚度射线。
-	bool bUseSphereContactProbe = true;
+	// 车轮接触检测探针形态。
+	ECirrovaWheelProbeMode WheelProbeMode = ECirrovaWheelProbeMode::Cylinder;
 
-	// 轮胎侧向松弛长度（m）；0 关闭。
+	// 轮胎纵/侧向松弛长度（m）；0 关闭。
 	float TireRelaxationLength = 0.3f;
 
 	// 空气动力学：阻力与下压力（SI）。
@@ -280,6 +296,8 @@ struct FCirrovaVehicleRuntime
 	FVector AeroCenterOfPressure = FVector::ZeroVector;
 
 	float TireFriction = 1.0f;
+	float TireLateralFrictionScale = 1.0f;
+	float TireStaticFrictionScale = 1.0f;
 	float TireLateralStiffness = 0.0f;
 	float TireLoadSensitivity = 0.0f;
 	float TireReferenceLoad = 0.0f;
@@ -333,6 +351,13 @@ struct FCirrovaWheelOutput
 	float RollingResistance = 0.0f;
 	float FrictionForceLimit = 0.0f;
 	float LateralForceLimit = 0.0f;
+	float StaticFrictionForceLimit = 0.0f;
+	float StaticLateralForceLimit = 0.0f;
+	float KineticFrictionForceLimit = 0.0f;
+	float KineticLateralForceLimit = 0.0f;
+	float GroundFriction = 1.0f;
+	float GroundStaticFriction = 1.0f;
+	float RelaxedSurfaceSpeed = 0.0f;
 	float FrictionUtilization = 0.0f;
 	bool bTireConstraintApplied = false;
 	float LongitudinalImpulse = 0.0f;

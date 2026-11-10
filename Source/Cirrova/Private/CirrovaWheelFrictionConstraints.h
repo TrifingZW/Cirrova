@@ -15,8 +15,8 @@ class FCirrovaWheelFrictionConstraints;
 /**
  * 单轮轮胎摩擦约束的求解输入。
  *
- * 世界坐标系，长度与位置为厘米，力为 kg·cm/s²。纵向与侧向共用一个摩擦圆界：
- * 先求解纵向，侧向在剩余圆界内求解。
+ * 世界坐标系，长度与位置为厘米，力为 kg·cm/s²。纵向与侧向共用摩擦椭圆界：
+ * 坐标块迭代先求解纵向，再按剩余半轴长度求解侧向。
  */
 struct FCirrovaWheelFrictionSettings
 {
@@ -30,7 +30,7 @@ struct FCirrovaWheelFrictionSettings
 	// 接触点地面速度（cm/s），含地面刚体的平动与转动贡献。
 	Chaos::FVec3 GroundVelocity{0.0f, 0.0f, 0.0f};
 
-	// 轮面线速度（cm/s），纵向约束的目标速度组成部分。
+	// 松弛后的轮面线速度（cm/s），纵向约束的目标速度组成部分。
 	float WheelSurfaceSpeed = 0.0f;
 
 	// 车轮半径（cm）与轮端等效转动惯量（kg·cm²）。
@@ -42,10 +42,10 @@ struct FCirrovaWheelFrictionSettings
 	// 纵向冲量按纯底盘求解，轮端反作用由一维域制动器承担。
 	bool bWheelLocked = false;
 
-	// 摩擦圆上限（kg·cm/s²），作为两轴冲量的共同界。
-	float FrictionForceLimit = 0.0f;
+	// 纵向摩擦椭圆长轴界（kg·cm/s²）。
+	float LongitudinalForceLimit = 0.0f;
 
-	// 侧向冲量界（kg·cm/s²），由轮胎模型的侧偏刚度与低速阻尼给出。
+	// 侧向摩擦椭圆短轴界（kg·cm/s²）。
 	float LateralForceLimit = 0.0f;
 
 	// 是否参与求解；离地或载荷为零时为 false。
@@ -216,7 +216,7 @@ private:
 		Chaos::FGeometryParticleHandle* Particle = nullptr;
 		Chaos::FSolverBody* SolverBody = nullptr;
 
-		// 本物理子步的冲量界与累计冲量（kg·cm/s）。
+		// 本物理子步的椭圆冲量界与累计冲量（kg·cm/s）。
 		float MaxLongitudinalImpulse = 0.0f;
 		float MaxLateralImpulse = 0.0f;
 		float AccumulatedLongitudinal = 0.0f;
