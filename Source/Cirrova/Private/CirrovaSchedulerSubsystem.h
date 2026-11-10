@@ -33,7 +33,7 @@ class CIRROVA_API UCirrovaSchedulerSubsystem : public UWorldSubsystem
 	// 注册在 Chaos Solver 上的异步回调。
 	FCirrovaAsyncCallback* AsyncCallback = nullptr;
 
-	// 每个物理场景共享一份轮胎摩擦约束容器；随场景存活，注销时销毁。
+	// 每个物理场景共享一份轮胎摩擦约束容器；随场景存活，子系统销毁时移交延迟回收。
 	TUniquePtr<FCirrovaWheelFrictionConstraints> WheelConstraints;
 
 	FPhysScene_Chaos* PhysicsScene = nullptr;

@@ -22,6 +22,18 @@ struct FCirrovaTestVehicleSetup
 	bool bEnableAerodynamics = true;
 	bool bUseBaselineSuspension = false;
 	bool bUseProgressiveSuspension = false;
+	float FrontBrakeTorqueScale = 1.0f;
+	float RearBrakeTorqueScale = 1.0f;
+	bool bEnableABS = false;
+	float DifferentialMaxTorqueOverride = -1.0f;
+	float MaxBrakeTorqueOverride = -1.0f;
+	bool bForceSuspensionFallback = false;
+	bool bEnableAckermannSteering = true;
+	float SteeringRateLimit = 540.0f;
+	float MaxHandbrakeTorque = 2000.0f;
+	bool bUseEngineBrakingCurve = false;
+	bool bEnableTorqueVectoring = false;
+	float TorqueVectoringStrength = 300.0f;
 };
 
 /**
@@ -52,6 +64,9 @@ public:
 
 	// 写入驾驶输入。
 	void SetInputs(float Throttle, float Steering, float Brake, int32 Gear) const;
+
+	// 写入手刹输入。
+	void SetHandbrake(float Value) const;
 
 	// 清零线速度与角速度。
 	void ZeroMotion() const;
@@ -101,4 +116,40 @@ private:
 
 	UPROPERTY()
 	bool bUseProgressiveSuspension = false;
+
+	UPROPERTY()
+	float FrontBrakeTorqueScale = 1.0f;
+
+	UPROPERTY()
+	float RearBrakeTorqueScale = 1.0f;
+
+	UPROPERTY()
+	bool bEnableABS = false;
+
+	UPROPERTY()
+	float DifferentialMaxTorqueOverride = -1.0f;
+
+	UPROPERTY()
+	float MaxBrakeTorqueOverride = -1.0f;
+
+	UPROPERTY()
+	bool bForceSuspensionFallback = false;
+
+	UPROPERTY()
+	bool bEnableAckermannSteering = true;
+
+	UPROPERTY()
+	float SteeringRateLimit = 540.0f;
+
+	UPROPERTY()
+	float MaxHandbrakeTorque = 2000.0f;
+
+	UPROPERTY()
+	bool bUseEngineBrakingCurve = false;
+
+	UPROPERTY()
+	bool bEnableTorqueVectoring = false;
+
+	UPROPERTY()
+	float TorqueVectoringStrength = 300.0f;
 };

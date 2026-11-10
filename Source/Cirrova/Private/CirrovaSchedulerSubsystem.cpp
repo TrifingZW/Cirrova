@@ -221,7 +221,7 @@ void UCirrovaSchedulerSubsystem::ReleasePendingRuntimes()
 		{
 			if (!Runtime) { continue; }
 
-			// 约束已在注销时释放（PendingRelease 的唯一来源是 UnregisterVehicle）。
+			// 约束已在注销或子系统销毁时释放，此处仅销毁运行态。
 			Solver->EnqueueCommandImmediate(
 				[Runtime = MoveTemp(Runtime)]() mutable { Runtime.Reset(); }
 			);

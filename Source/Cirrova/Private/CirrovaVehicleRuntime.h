@@ -20,6 +20,13 @@ struct FCirrovaSuspensionCurveRuntimePoint
 	float StiffnessScale = 1.0f;
 };
 
+/** 运行态发动机制动曲线采样点。 */
+struct FCirrovaEngineBrakingRuntimePoint
+{
+	float RPM = 0.0f;
+	float Torque = 0.0f;
+};
+
 /** 单轮物理运行态，仅在物理线程读写。 */
 struct FCirrovaWheelRuntime
 {
@@ -35,9 +42,6 @@ struct FCirrovaWheelRuntime
 
 	// 轮胎摩擦约束在共享容器中的索引；仅物理线程读写。
 	int32 TireConstraintIndex = INDEX_NONE;
-
-	// 转向控制端口，0 表示不可转向。
-	uint64 SteeringPort = 0;
 
 	// 是否参与转向（决定接触坐标系的转向角）。
 	bool bSteerable = false;
@@ -88,10 +92,16 @@ struct FCirrovaWheelRuntime
 	// 车轮角速度（rad/s）。
 	float Omega = 0.0f;
 
+	// 本步转向节目标转角（rad；liminal 车辆坐标系 X=右，绕上轴正值为右转）。
+	float SteeringAngleRad = 0.0f;
+
+	// 本步制动信号（归一化 [0,1]，含手刹与 ABS 调制），相对转向节制动容量。
+	float BrakeSignal = 0.0f;
+
 	// 轮胎冲量模型使用的轮端等效转动惯量（kg·m²）。
 	float EffectiveInertia = 0.0f;
 
-	// 轮胎约束当前采用的轮端惯量消元项 R²/J（1/kg）；制动锁止或未启用时为 0。
+	// 轮胎约束当前采用的轮端惯量消元项 R²/J（1/kg）；约束未启用时为 0。
 	float ConstraintWheelInverseMass = 0.0f;
 
 	// 轮心（世界坐标，cm）。
@@ -171,6 +181,13 @@ struct FCirrovaWheelRuntime
 
 	// 该轮本步是否以轮胎约束进入求解器。
 	bool bTireConstraintApplied = false;
+
+	// 本步制动扭矩容量（N·m）：脚刹（含 ABS 调制）与手刹取较大值。
+	float BrakeTorqueCapacity = 0.0f;
+
+	// 锁止观测：约束求解后轮端静止（|ω| < 0.5 rad/s）且制动容量非零；
+	// P1.4 起锁止是涌现行为，不再是输入判据。
+	bool bWheelLocked = false;
 
 	// 上一物理帧求解的冲量（N·s）与累计窗口（s）。
 	float LongitudinalImpulse = 0.0f;
@@ -272,6 +289,9 @@ struct FCirrovaVehicleRuntime
 	// 允许底盘休眠；false 时物理线程每步保持唤醒。
 	bool bAllowPhysicsSleep = true;
 
+	// 强制悬挂走射线弹簧回退（忽略地面代理类型），用于验证 Landscape 回退路径。
+	bool bForceSuspensionFallback = false;
+
 	// 本步耦合诊断：外力回退的内部子步数、求解器步长与轮胎约束形态。
 	int32 AppliedSubsteps = 1;
 	float SolverDeltaTime = 0.0f;
@@ -286,6 +306,45 @@ struct FCirrovaVehicleRuntime
 
 	// 轮胎纵/侧向松弛长度（m）；0 关闭。
 	float TireRelaxationLength = 0.3f;
+
+	// ABS 参数：进入/退出滑移阈值、泄压/建压速率（每秒）、最低生效车速（m/s）。
+	float ABSSlipThreshold = 0.3f;
+	float ABSReleaseThreshold = 0.15f;
+	float ABSReleaseRate = 40.0f;
+	float ABSApplyRate = 60.0f;
+	float ABSMinSpeed = 2.0f;
+
+	// TCS 参数：滑移阈值与泄压速率（每秒）。
+	float TCSSlipThreshold = 0.20f;
+	float TCSReleaseRate = 10.0f;
+
+	// 逐轮转向节信号端口（转向节端口索引 2）。
+	TArray<uint64> SteeringSignalPorts;
+
+	// 参考转向角（rad；liminal 约定正值为右转），受转向速率限制。
+	float SteeringAngleRad = 0.0f;
+
+	// 阿克曼转向与转向速率限制。
+	bool bEnableAckermannSteering = true;
+	float SteeringRateLimitRad = 0.0f;
+
+	// 手刹：最大扭矩（N·m）与是否仅后轴。
+	float MaxHandbrakeTorque = 0.0f;
+	bool bHandbrakeRearOnly = true;
+
+	// 发动机制动曲线（启用时 liminal 内置线性制动置 0）。
+	bool bUseEngineBrakingCurve = false;
+	// 怠速角速度（rad/s），用于判定是否进入发动机制动区间。
+	float EngineIdleAngularVelocity = 0.0f;
+	TArray<FCirrovaEngineBrakingRuntimePoint> EngineBrakingCurve;
+
+	// 扭矩矢量：开关与强度（N·m）。
+	bool bEnableTorqueVectoring = false;
+	float TorqueVectoringStrength = 0.0f;
+
+	// 最近一步的驾驶输入缓存（扭矩矢量用）。
+	float LastThrottleInput = 0.0f;
+	float LastSteeringInput = 0.0f;
 
 	// 空气动力学：阻力与下压力（SI）。
 	bool bEnableAerodynamics = true;
@@ -303,12 +362,30 @@ struct FCirrovaVehicleRuntime
 	float TireReferenceLoad = 0.0f;
 	float TireRollingResistance = 0.0f;
 	float WheelInertia = 0.0f;
-	float MaxBrakeTorque = 0.0f;
+	// 逐轮制动扭矩容量（N·m）；含前后轴比例。
+	TArray<float> MaxBrakeTorquePerWheel;
+
+	// 逐轮转向节制动力矩容量（N·m）：脚刹与手刹容量的较大值。
+	TArray<float> KnuckleBrakeTorquePerWheel;
+
+	// 逐轮转向节制动信号端口；P1.4 起信号经此直写，不再经过制动分发器。
+	TArray<uint64> BrakeSignalPorts;
+
+	// ABS 逐轮调制（[0,1]，1 为全压）；物理线程读写，游戏线程只读遥测。
+	TArray<float> ABSModulation;
+
+	// 逐轮是否连接驱动链（决定 TCS 滑移监控范围）。
+	TArray<bool> DrivenWheels;
+
+	// TCS 油门倍率（[0,1]）；驱动轮滑移超限时泄压。
+	float TCSModulation = 1.0f;
+
+	// 是否启用 ABS 与 TCS。
+	bool bEnableABS = false;
+	bool bEnableTCS = false;
 
 	uint64 ThrottleSignalPort = 0;
-	uint64 SteeringSignalPort = 0;
 	uint64 GearSignalPort = 0;
-	uint64 BrakeSignalPort = 0;
 	uint64 EngineShaftPort = 0;
 };
 
@@ -323,6 +400,7 @@ struct FCirrovaVehicleAsyncInput
 	float Throttle = 0.0f;
 	float Steering = 0.0f;
 	float Brake = 0.0f;
+	float Handbrake = 0.0f;
 	int32 Gear = 0;
 };
 
@@ -360,6 +438,10 @@ struct FCirrovaWheelOutput
 	float RelaxedSurfaceSpeed = 0.0f;
 	float FrictionUtilization = 0.0f;
 	bool bTireConstraintApplied = false;
+	bool bWheelLocked = false;
+	float BrakeTorqueCapacity = 0.0f;
+	float ABSModulation = 1.0f;
+	float SteeringAngleDegrees = 0.0f;
 	float LongitudinalImpulse = 0.0f;
 	float LateralImpulse = 0.0f;
 	float ImpulseWindow = 0.0f;

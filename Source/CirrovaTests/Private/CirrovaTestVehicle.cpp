@@ -46,6 +46,22 @@ void ACirrovaTestVehicle::PostInitializeComponents()
 	Vehicle->TireLateralFrictionScale = TireLateralFrictionScale;
 	Vehicle->TireStaticFrictionScale = TireStaticFrictionScale;
 	Vehicle->bEnableAerodynamics = bEnableAerodynamics;
+	Vehicle->FrontBrakeTorqueScale = FrontBrakeTorqueScale;
+	Vehicle->RearBrakeTorqueScale = RearBrakeTorqueScale;
+	Vehicle->bEnableABS = bEnableABS;
+	if (DifferentialMaxTorqueOverride >= 0.0f)
+	{
+		Vehicle->FrontDifferentialMaxTorque = DifferentialMaxTorqueOverride;
+		Vehicle->RearDifferentialMaxTorque = DifferentialMaxTorqueOverride;
+	}
+	if (MaxBrakeTorqueOverride >= 0.0f) { Vehicle->MaxBrakeTorque = MaxBrakeTorqueOverride; }
+	Vehicle->bForceSuspensionFallback = bForceSuspensionFallback;
+	Vehicle->bEnableAckermannSteering = bEnableAckermannSteering;
+	Vehicle->SteeringRateLimit = SteeringRateLimit;
+	Vehicle->MaxHandbrakeTorque = MaxHandbrakeTorque;
+	Vehicle->bUseEngineBrakingCurve = bUseEngineBrakingCurve;
+	Vehicle->bEnableTorqueVectoring = bEnableTorqueVectoring;
+	Vehicle->TorqueVectoringStrength = TorqueVectoringStrength;
 
 	if (bUseBaselineSuspension)
 	{
@@ -97,6 +113,18 @@ void ACirrovaTestVehicle::Configure(const FCirrovaTestVehicleSetup& InSetup)
 	bEnableAerodynamics = InSetup.bEnableAerodynamics;
 	bUseBaselineSuspension = InSetup.bUseBaselineSuspension;
 	bUseProgressiveSuspension = InSetup.bUseProgressiveSuspension;
+	FrontBrakeTorqueScale = InSetup.FrontBrakeTorqueScale;
+	RearBrakeTorqueScale = InSetup.RearBrakeTorqueScale;
+	bEnableABS = InSetup.bEnableABS;
+	DifferentialMaxTorqueOverride = InSetup.DifferentialMaxTorqueOverride;
+	MaxBrakeTorqueOverride = InSetup.MaxBrakeTorqueOverride;
+	bForceSuspensionFallback = InSetup.bForceSuspensionFallback;
+	bEnableAckermannSteering = InSetup.bEnableAckermannSteering;
+	SteeringRateLimit = InSetup.SteeringRateLimit;
+	MaxHandbrakeTorque = InSetup.MaxHandbrakeTorque;
+	bUseEngineBrakingCurve = InSetup.bUseEngineBrakingCurve;
+	bEnableTorqueVectoring = InSetup.bEnableTorqueVectoring;
+	TorqueVectoringStrength = InSetup.TorqueVectoringStrength;
 }
 
 void ACirrovaTestVehicle::SetInputs(
@@ -112,6 +140,11 @@ void ACirrovaTestVehicle::SetInputs(
 	Vehicle->SetSteering(FMath::Clamp(Steering, -1.0f, 1.0f));
 	Vehicle->SetBrake(FMath::Clamp(Brake, 0.0f, 1.0f));
 	Vehicle->SetGear(FMath::Max(Gear, 0));
+}
+
+void ACirrovaTestVehicle::SetHandbrake(const float Value) const
+{
+	if (Vehicle) { Vehicle->SetHandbrake(FMath::Clamp(Value, 0.0f, 1.0f)); }
 }
 
 void ACirrovaTestVehicle::ZeroMotion() const

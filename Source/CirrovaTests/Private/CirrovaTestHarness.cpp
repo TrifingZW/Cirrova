@@ -314,6 +314,9 @@ void FCirrovaTestHarness::Tick(const float DeltaTime)
 			AppendFloat(Fields, Wheel.GroundFriction);
 			AppendFloat(Fields, Wheel.GroundStaticFriction);
 			AppendFloat(Fields, Wheel.RelaxedSurfaceSpeed);
+			Fields.Add(BoolText(Wheel.bWheelLocked));
+			AppendFloat(Fields, Wheel.BrakeTorqueCapacity);
+			AppendFloat(Fields, Wheel.ABSModulation);
 
 			const FString Line = FString::Join(Fields, TEXT(",")) + TEXT("\r\n");
 			FTCHARToUTF8 Utf8(*Line);
@@ -369,7 +372,8 @@ void FCirrovaTestHarness::BeginCase(const FString& InCaseName)
 		"constraint_length_m,antiroll_n,rolling_n,tire_constraint_applied,"
 		"long_impulse_ns,lat_impulse_ns,impulse_window_s,constraint_wheel_inv_mass_1_kg,"
 		"static_friction_limit_n,static_lateral_limit_n,kinetic_friction_limit_n,kinetic_lateral_limit_n,"
-		"ground_friction,ground_static_friction,relaxed_surface_speed_m_s\r\n"
+		"ground_friction,ground_static_friction,relaxed_surface_speed_m_s,"
+		"wheel_locked,brake_capacity_nm,abs_modulation\r\n"
 	);
 	FTCHARToUTF8 Utf8(*Header);
 	CsvFile->Serialize(reinterpret_cast<uint8*>(const_cast<ANSICHAR*>(Utf8.Get())), Utf8.Length());

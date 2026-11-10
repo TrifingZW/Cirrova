@@ -105,7 +105,8 @@ bool UCirrovaTestWorldSubsystem::IsTickable() const
 
 void UCirrovaTestWorldSubsystem::ParseCommandLine()
 {
-	if (!FParse::Value(FCommandLine::Get(), TEXT("CirrovaTest="), ScenarioSpec))
+	// 场景列表本身以逗号分隔，解析时禁用分隔符截断。
+	if (!FParse::Value(FCommandLine::Get(), TEXT("CirrovaTest="), ScenarioSpec, false))
 	{
 		bEnabled = false;
 		return;
@@ -118,7 +119,7 @@ void UCirrovaTestWorldSubsystem::ParseCommandLine()
 		return;
 	}
 
-	FParse::Value(FCommandLine::Get(), TEXT("CirrovaTestOut="), OutputDir);
+	FParse::Value(FCommandLine::Get(), TEXT("CirrovaTestOut="), OutputDir, false);
 	if (OutputDir.IsEmpty())
 	{
 		OutputDir = FPaths::Combine(

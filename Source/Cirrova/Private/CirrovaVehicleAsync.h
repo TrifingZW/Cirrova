@@ -5,11 +5,6 @@
 #include "Chaos/SimCallbackInput.h"
 #include "Chaos/SimCallbackObject.h"
 
-namespace Chaos
-{
-	class FCollisionContactModifier;
-}
-
 class FCirrovaWheelFrictionConstraints;
 
 /** 物理线程输入：本物理步要推进的所有载具。 */
@@ -55,7 +50,6 @@ class FCirrovaAsyncCallback final : public Chaos::TSimCallbackObject<
 public:
 	virtual void OnPreSimulate_Internal() override;
 	virtual void OnPostSolve_Internal() override;
-	virtual void OnContactModification_Internal(Chaos::FCollisionContactModifier& Modifier) override;
 
 private:
 	/** 本物理步需要收尾的载具；指针在求解结束后仍有效（注销延迟到物理帧末）。 */

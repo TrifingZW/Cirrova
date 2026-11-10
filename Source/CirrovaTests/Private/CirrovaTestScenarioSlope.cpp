@@ -57,8 +57,8 @@ namespace
 				const float DriftTotal = static_cast<float>(Delta.Size2D());
 				const float EndSpeed = Stat.MeanSpeed;
 
-				const float Limit = 0.5f;
-				const float LimitTotal = 0.5f;
+				const float Limit = 0.3f;
+				const float LimitTotal = 0.3f;
 				AddCheck(DriftLateral < Limit, FString::Printf(TEXT("v%d 侧向蠕滑 %.3f m"), Index, DriftLateral));
 				AddCheck(DriftTotal < LimitTotal, FString::Printf(TEXT("v%d 面内总蠕滑 %.3f m"), Index, DriftTotal));
 				AddCheck(EndSpeed < 0.25f, FString::Printf(TEXT("v%d 测量窗平均速度 %.3f m/s"), Index, EndSpeed));
@@ -160,9 +160,9 @@ namespace
 
 				const FVector Delta = (Stat.EndLocation - Stat.StartLocation) * 0.01f;
 				const float DriftDownhill = FMath::Abs(FVector::DotProduct(Delta, Forward));
-				const float Limit = 0.4f;
+				const float Limit = 0.2f;
 				AddCheck(DriftDownhill < Limit, FString::Printf(TEXT("v%d 下坡滑移 %.3f m"), Index, DriftDownhill));
-				AddCheck(Stat.MeanSpeed < 0.25f, FString::Printf(TEXT("v%d 平均速度 %.3f m/s"), Index, Stat.MeanSpeed));
+				AddCheck(Stat.MeanSpeed < 0.15f, FString::Printf(TEXT("v%d 平均速度 %.3f m/s"), Index, Stat.MeanSpeed));
 
 				const float Omega = MeanWheelOmega(Samples, 5.0, End);
 				AddCheck(Omega < 0.5f, FString::Printf(TEXT("v%d 车轮平均角速度 %.3f rad/s"), Index, Omega));
@@ -179,7 +179,7 @@ namespace
 					const FWheelStat WheelStat = ComputeWheelStat(Samples, WheelIndex, 5.0, End);
 					if (WheelStat.Count <= 0) { continue; }
 					AddCheck(WheelStat.MeanAbsOmega < 0.5f, FString::Printf(TEXT("v%d 车轮 %d 驻车角速度 %.3f rad/s"), Index, WheelIndex, WheelStat.MeanAbsOmega));
-					AddCheck(WheelStat.MeanConstraintWheelInverseMass < 0.005f, FString::Printf(TEXT("v%d 车轮 %d 制动期间轮端未锁止（R²/J=%.4f）"), Index, WheelIndex, WheelStat.MeanConstraintWheelInverseMass));
+					AddCheck(WheelStat.LockedFraction > 0.9f, FString::Printf(TEXT("v%d 车轮 %d 制动期间锁止帧占比 %.2f 过低"), Index, WheelIndex, WheelStat.LockedFraction));
 					ForceSum += WheelStat.MeanLongitudinalForce;
 					MaxUtilization = FMath::Max(MaxUtilization, WheelStat.MaxUtilization);
 				}

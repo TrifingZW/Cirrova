@@ -135,6 +135,21 @@ UCirrovaVehicleComponent::UCirrovaVehicleComponent()
 	WheelConfigs[1].bSteerable = true;
 	WheelConfigs[2].MountLocation = FVector(-140.0f, -80.0f, 0.0f);
 	WheelConfigs[3].MountLocation = FVector(-140.0f, 80.0f, 0.0f);
+
+	// 默认发动机制动曲线（启用时覆盖 liminal 的线性制动）。
+	EngineBrakingCurve.Reset();
+	{
+		FCirrovaEngineBrakingPoint Point;
+		Point.RPM = 0.0f;
+		Point.Torque = 0.0f;
+		EngineBrakingCurve.Add(Point);
+		Point.RPM = 3000.0f;
+		Point.Torque = 80.0f;
+		EngineBrakingCurve.Add(Point);
+		Point.RPM = 6000.0f;
+		Point.Torque = 140.0f;
+		EngineBrakingCurve.Add(Point);
+	}
 }
 
 void UCirrovaVehicleComponent::BeginPlay()
@@ -387,7 +402,8 @@ void UCirrovaVehicleComponent::TickComponent(
 
 	// 驾驶员输入期间保持刚体唤醒：休眠的底盘不会响应求解器内的轮胎冲量。
 	if (ChassisPrimitive.IsValid()
-		&& (ThrottleInput > 0.0f || BrakeInput > 0.0f || !FMath::IsNearlyZero(SteeringInput)))
+		&& (ThrottleInput > 0.0f || BrakeInput > 0.0f || HandbrakeInput > 0.0f
+			|| !FMath::IsNearlyZero(SteeringInput)))
 	{
 		ChassisPrimitive->WakeRigidBody();
 	}
@@ -435,6 +451,12 @@ void UCirrovaVehicleComponent::SetBrake(float Value)
 	if (ChassisPrimitive.IsValid() && Value > 0.0f) { ChassisPrimitive->WakeRigidBody(); }
 }
 
+void UCirrovaVehicleComponent::SetHandbrake(float Value)
+{
+	HandbrakeInput = Value;
+	if (ChassisPrimitive.IsValid() && Value > 0.0f) { ChassisPrimitive->WakeRigidBody(); }
+}
+
 void UCirrovaVehicleComponent::SetGear(int32 Gear)
 {
 	GearInput = Gear;
@@ -456,9 +478,10 @@ FString UCirrovaVehicleComponent::GetWheelDebugText(int32 WheelIndex) const
 		? (State.bUsingConstraintLength ? TEXT("原生约束/约束长度") : TEXT("原生约束/射线长度"))
 		: TEXT("弹簧力");
 	const TCHAR* ClampText = State.bCompressionVelocityClamped ? TEXT("  [钳制]") : TEXT("");
+	const TCHAR* LockText = State.bWheelLocked ? TEXT("锁止") : TEXT("未锁止");
 
 	return FString::Printf(
-		TEXT("轮 %d %s  耦合:%s  悬挂:%s\n")
+		TEXT("轮 %d %s  耦合:%s  悬挂:%s  制动:%s ABS %.2f 容量 %.0f N·m\n")
 		TEXT("弹簧 %.3f m  约束 %.3f m  压缩 %.3f m  压缩速度 %.2f m/s%s\n")
 		TEXT("法向载荷 %.0f N  悬挂力 %.0f N  防倾 %.0f N  摩擦椭圆 有效 %.0f/%.0f N（静 %.0f/%.0f，动 %.0f/%.0f）\n")
 		TEXT("地面摩擦 %.2f/%.2f  滑移率 %.3f  侧偏角 %.1f°（松弛 %.1f°） 轮面 %.2f m/s  惯量 %.2f kg·m²\n")
@@ -468,6 +491,9 @@ FString UCirrovaVehicleComponent::GetWheelDebugText(int32 WheelIndex) const
 		ContactText,
 		CouplingText,
 		SuspensionText,
+		LockText,
+		State.ABSModulation,
+		State.BrakeTorqueCapacity,
 		State.SuspensionLength,
 		State.SuspensionConstraintLength,
 		State.Compression,
@@ -530,6 +556,7 @@ void UCirrovaVehicleComponent::ProduceAsyncInput(FCirrovaVehicleAsyncInput& Out)
 	Out.Throttle = ThrottleInput;
 	Out.Steering = SteeringInput;
 	Out.Brake = BrakeInput;
+	Out.Handbrake = HandbrakeInput;
 	Out.Gear = GearInput;
 	Out.BlockingObjects.Reset();
 
@@ -749,6 +776,10 @@ void UCirrovaVehicleComponent::ConsumeAsyncOutput(const FCirrovaVehicleOutput& I
 		Target.RelaxedSurfaceSpeed = Source.RelaxedSurfaceSpeed;
 		Target.FrictionUtilization = Source.FrictionUtilization;
 		Target.bTireConstraintApplied = Source.bTireConstraintApplied;
+		Target.bWheelLocked = Source.bWheelLocked;
+		Target.BrakeTorqueCapacity = Source.BrakeTorqueCapacity;
+		Target.ABSModulation = Source.ABSModulation;
+		Target.SteeringAngleDegrees = Source.SteeringAngleDegrees;
 		Target.LongitudinalImpulse = Source.LongitudinalImpulse;
 		Target.LateralImpulse = Source.LateralImpulse;
 		Target.ImpulseWindow = Source.ImpulseWindow;
@@ -788,7 +819,10 @@ void UCirrovaVehicleComponent::ConsumeAsyncOutput(const FCirrovaVehicleOutput& I
 				|| !FMath::IsFinite(Wheel.RelaxedSurfaceSpeed)
 				|| !FMath::IsFinite(Wheel.FrictionUtilization)
 				|| !FMath::IsFinite(Wheel.SlipRatio)
-				|| !FMath::IsFinite(Wheel.SlipAngleDegrees))
+				|| !FMath::IsFinite(Wheel.SlipAngleDegrees)
+				|| !FMath::IsFinite(Wheel.SteeringAngleDegrees)
+				|| !FMath::IsFinite(Wheel.BrakeTorqueCapacity)
+				|| !FMath::IsFinite(Wheel.ABSModulation))
 			{
 				bWarnedNonFiniteTelemetry = true;
 				UE_LOG(
@@ -828,7 +862,8 @@ void UCirrovaVehicleComponent::ConsumeAsyncOutput(const FCirrovaVehicleOutput& I
 	bDebugSubstepBudgetExceeded = In.bSubstepBudgetExceeded;
 
 	// 地面代理不被原生悬挂约束支持时告警一次，说明已逐轮改用射线弹簧力。
-	if (!bWarnedGroundProxyFallback)
+	// 强制回退为显式调试/测试配置，不重复告警。
+	if (!bWarnedGroundProxyFallback && !bForceSuspensionFallback)
 	{
 		for (int32 Index = 0; Index < In.Wheels.Num(); ++Index)
 		{
@@ -956,12 +991,13 @@ bool UCirrovaVehicleComponent::ValidateConfiguration(FString& OutError) const
 	}
 	if (!FMath::IsFinite(GearboxInertia) || GearboxInertia < 0.0f
 		|| !FMath::IsFinite(AxleInertia) || AxleInertia < 0.0f
-		|| !FMath::IsFinite(DifferentialMaxTorque) || DifferentialMaxTorque < 0.0f
+		|| !FMath::IsFinite(FrontDifferentialMaxTorque) || FrontDifferentialMaxTorque < 0.0f
+		|| !FMath::IsFinite(RearDifferentialMaxTorque) || RearDifferentialMaxTorque < 0.0f
 		|| !FMath::IsFinite(WheelInertia) || WheelInertia <= 0.0f
 		|| !FMath::IsFinite(WheelFrictionTorque) || WheelFrictionTorque < 0.0f
 		|| !FMath::IsFinite(MaxBrakeTorque) || MaxBrakeTorque < 0.0f)
 	{
-		return Fail(TEXT("传动系惯量、摩擦与制动参数必须为非负有限值，车轮惯量必须为正"));
+		return Fail(TEXT("传动系惯量、限滑、摩擦与制动参数必须为非负有限值，车轮惯量必须为正"));
 	}
 
 	if (!FMath::IsFinite(TireFriction) || TireFriction < 0.0f
@@ -992,6 +1028,47 @@ bool UCirrovaVehicleComponent::ValidateConfiguration(FString& OutError) const
 	}
 
 	if (!FMath::IsFinite(MaxSteeringAngle) || MaxSteeringAngle < 0.0f) { return Fail(TEXT("最大转向角必须为非负有限值")); }
+	if (!FMath::IsFinite(SteeringRateLimit) || SteeringRateLimit < 0.0f)
+	{
+		return Fail(TEXT("转向速率限制必须为非负有限值（0 表示不限）"));
+	}
+	if (!FMath::IsFinite(MaxHandbrakeTorque) || MaxHandbrakeTorque < 0.0f)
+	{
+		return Fail(TEXT("手刹最大扭矩必须为非负有限值"));
+	}
+	if (!FMath::IsFinite(TorqueVectoringStrength) || TorqueVectoringStrength < 0.0f)
+	{
+		return Fail(TEXT("扭矩矢量强度必须为非负有限值"));
+	}
+	for (int32 Index = 0; Index < EngineBrakingCurve.Num(); ++Index)
+	{
+		const FCirrovaEngineBrakingPoint& Point = EngineBrakingCurve[Index];
+		if (!FMath::IsFinite(Point.RPM) || Point.RPM < 0.0f
+			|| !FMath::IsFinite(Point.Torque) || Point.Torque < 0.0f)
+		{
+			return Fail(FString::Printf(TEXT("发动机制动曲线采样点 %d 无效"), Index));
+		}
+	}
+
+	if (!FMath::IsFinite(FrontBrakeTorqueScale) || FrontBrakeTorqueScale < 0.0f
+		|| !FMath::IsFinite(RearBrakeTorqueScale) || RearBrakeTorqueScale < 0.0f)
+	{
+		return Fail(TEXT("前后轴制动扭矩比例必须为非负有限值"));
+	}
+	if (!FMath::IsFinite(ABSSlipThreshold) || ABSSlipThreshold <= 0.0f
+		|| !FMath::IsFinite(ABSReleaseThreshold) || ABSReleaseThreshold <= 0.0f
+		|| ABSReleaseThreshold >= ABSSlipThreshold
+		|| !FMath::IsFinite(ABSReleaseRate) || ABSReleaseRate <= 0.0f
+		|| !FMath::IsFinite(ABSApplyRate) || ABSApplyRate <= 0.0f
+		|| !FMath::IsFinite(ABSMinSpeed) || ABSMinSpeed < 0.0f)
+	{
+		return Fail(TEXT("ABS 参数无效：需满足 0 < 建压阈值 < 泄压阈值，速率与最低车速为非负有限值"));
+	}
+	if (!FMath::IsFinite(TCSSlipThreshold) || TCSSlipThreshold <= 0.0f
+		|| !FMath::IsFinite(TCSReleaseRate) || TCSReleaseRate <= 0.0f)
+	{
+		return Fail(TEXT("TCS 参数必须为正有限值"));
+	}
 
 	for (int32 Index = 0; Index < WheelConfigs.Num(); ++Index)
 	{
@@ -1133,9 +1210,61 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 	Runtime.TireReferenceLoad = TireReferenceLoad;
 	Runtime.TireRollingResistance = TireRollingResistance;
 	Runtime.WheelInertia = WheelInertia;
-	Runtime.MaxBrakeTorque = MaxBrakeTorque;
+	// 逐轮制动容量：基础扭矩 × 前后轴比例（挂点 X ≥ 0 为前轴）。
+	Runtime.MaxBrakeTorquePerWheel.SetNum(WheelCount);
+	Runtime.KnuckleBrakeTorquePerWheel.SetNum(WheelCount);
+	Runtime.BrakeSignalPorts.SetNumZeroed(WheelCount);
+	Runtime.SteeringSignalPorts.SetNumZeroed(WheelCount);
+	Runtime.ABSModulation.Init(1.0f, WheelCount);
+	Runtime.DrivenWheels.Init(false, WheelCount);
+	for (int32 Index = 0; Index < WheelCount; ++Index)
+	{
+		const bool bRear = WheelConfigs[Index].MountLocation.X < 0.0f;
+		const float Scale = bRear
+			? FMath::Max(RearBrakeTorqueScale, 0.0f)
+			: FMath::Max(FrontBrakeTorqueScale, 0.0f);
+		const float FootCapacity = MaxBrakeTorque * Scale;
+		Runtime.MaxBrakeTorquePerWheel[Index] = FootCapacity;
+		const bool bHandbrakeOnWheel = !bHandbrakeRearOnly || bRear;
+		Runtime.KnuckleBrakeTorquePerWheel[Index] = bHandbrakeOnWheel
+			? FMath::Max(FootCapacity, FMath::Max(MaxHandbrakeTorque, 0.0f))
+			: FootCapacity;
+	}
+	Runtime.bEnableABS = bEnableABS;
+	Runtime.bEnableTCS = bEnableTCS;
+	Runtime.ABSSlipThreshold = ABSSlipThreshold;
+	Runtime.ABSReleaseThreshold = ABSReleaseThreshold;
+	Runtime.ABSReleaseRate = ABSReleaseRate;
+	Runtime.ABSApplyRate = ABSApplyRate;
+	Runtime.ABSMinSpeed = ABSMinSpeed;
+	Runtime.TCSSlipThreshold = TCSSlipThreshold;
+	Runtime.TCSReleaseRate = TCSReleaseRate;
+	Runtime.bEnableAckermannSteering = bEnableAckermannSteering;
+	Runtime.SteeringRateLimitRad = FMath::DegreesToRadians(FMath::Max(SteeringRateLimit, 0.0f));
+	Runtime.MaxHandbrakeTorque = FMath::Max(MaxHandbrakeTorque, 0.0f);
+	Runtime.bHandbrakeRearOnly = bHandbrakeRearOnly;
+	Runtime.bUseEngineBrakingCurve = bUseEngineBrakingCurve;
+	Runtime.EngineIdleAngularVelocity = EngineIdleRPM * 2.0 * PI / 60.0;
+	Runtime.bEnableTorqueVectoring = bEnableTorqueVectoring;
+	Runtime.TorqueVectoringStrength = FMath::Max(TorqueVectoringStrength, 0.0f);
+
+	// 发动机制动曲线：按 RPM 排序并缓存到运行态。
+	Runtime.EngineBrakingCurve.Reset(EngineBrakingCurve.Num());
+	for (const FCirrovaEngineBrakingPoint& Point : EngineBrakingCurve)
+	{
+		FCirrovaEngineBrakingRuntimePoint& RuntimePoint = Runtime.EngineBrakingCurve.AddDefaulted_GetRef();
+		RuntimePoint.RPM = Point.RPM;
+		RuntimePoint.Torque = Point.Torque;
+	}
+	Runtime.EngineBrakingCurve.Sort(
+		[](const FCirrovaEngineBrakingRuntimePoint& A, const FCirrovaEngineBrakingRuntimePoint& B)
+		{
+			return A.RPM < B.RPM;
+		}
+	);
 	Runtime.WheelProbeMode = WheelProbeMode;
 	Runtime.bAllowPhysicsSleep = bAllowPhysicsSleep;
+	Runtime.bForceSuspensionFallback = bForceSuspensionFallback;
 	Runtime.TireRelaxationLength = TireRelaxationLength;
 	Runtime.bEnableAerodynamics = bEnableAerodynamics;
 	Runtime.AeroAirDensity = AirDensity;
@@ -1160,8 +1289,6 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 	uint64 Chassis = 0;
 	uint64 Engine = 0;
 	uint64 Gearbox = 0;
-	uint64 SteeringSplitter = 0;
-	uint64 BrakeSplitter = 0;
 
 	liminal_vehicle_add_cockpit(Runtime.Handle, &Cockpit);
 
@@ -1203,7 +1330,7 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 	EngineParams.Inertia = EngineInertia;
 	EngineParams.IdleAngularVelocity = EngineIdleRPM * RpmToRadiansPerSecond;
 	EngineParams.IdleTorqueLimit = EngineIdleTorque;
-	EngineParams.EngineBrakingTorque = EngineBrakingTorque;
+	EngineParams.EngineBrakingTorque = bUseEngineBrakingCurve ? 0.0f : EngineBrakingTorque;
 	EngineParams.Curve = EngineCurvePoints.Num() > 0 ? EngineCurvePoints.GetData() : nullptr;
 	EngineParams.CurveCount = static_cast<size_t>(EngineCurvePoints.Num());
 	liminal_vehicle_add_engine_with_params(Runtime.Handle, &EngineParams, &Engine);
@@ -1274,11 +1401,13 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 
 	uint64 FrontAxle = 0;
 	uint64 RearAxle = 0;
-	if (bDriveFront && !AddDriveUnit(FrontWheels.Num(), DifferentialMaxTorque, AxleInertia, FrontAxle))
+	if (bDriveFront
+		&& !AddDriveUnit(FrontWheels.Num(), FrontDifferentialMaxTorque, AxleInertia, FrontAxle))
 	{
 		return false;
 	}
-	if (bDriveRear && !AddDriveUnit(RearWheels.Num(), DifferentialMaxTorque, AxleInertia, RearAxle))
+	if (bDriveRear
+		&& !AddDriveUnit(RearWheels.Num(), RearDifferentialMaxTorque, AxleInertia, RearAxle))
 	{
 		return false;
 	}
@@ -1334,19 +1463,12 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 	if (bDriveFront && !AssignAxleOutputs(FrontWheels, FrontAxle)) { return false; }
 	if (bDriveRear && !AssignAxleOutputs(RearWheels, RearAxle)) { return false; }
 
-	liminal_vehicle_add_splitter(Runtime.Handle, static_cast<size_t>(WheelCount), &SteeringSplitter);
-	liminal_vehicle_add_splitter(Runtime.Handle, static_cast<size_t>(WheelCount), &BrakeSplitter);
-
-	// 驾驶舱信号：油门/挡位直达，转向与制动经分发器到各轮。
+	// 驾驶舱信号：油门/挡位直达；转向与制动逐轮直写（见逐轮循环）。
 	Runtime.ThrottleSignalPort = PortOf(Runtime.Handle, Cockpit, 0);
-	Runtime.SteeringSignalPort = PortOf(Runtime.Handle, Cockpit, 1);
 	Runtime.GearSignalPort = PortOf(Runtime.Handle, Cockpit, 2);
-	Runtime.BrakeSignalPort = PortOf(Runtime.Handle, Cockpit, 3);
 	Runtime.EngineShaftPort = PortOf(Runtime.Handle, Engine, 1);
 	if (!Connect(Runtime.Handle, Runtime.ThrottleSignalPort, PortOf(Runtime.Handle, Engine, 0))
-		|| !Connect(Runtime.Handle, Runtime.GearSignalPort, PortOf(Runtime.Handle, Gearbox, 0))
-		|| !Connect(Runtime.Handle, Runtime.SteeringSignalPort, PortOf(Runtime.Handle, SteeringSplitter, 0))
-		|| !Connect(Runtime.Handle, Runtime.BrakeSignalPort, PortOf(Runtime.Handle, BrakeSplitter, 0)))
+		|| !Connect(Runtime.Handle, Runtime.GearSignalPort, PortOf(Runtime.Handle, Gearbox, 0)))
 	{
 		return false;
 	}
@@ -1382,7 +1504,7 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 			Config.SuspensionMaxLength,
 			&Suspension
 		);
-		liminal_vehicle_add_knuckle(Runtime.Handle, MaxBrakeTorque, &Knuckle);
+		liminal_vehicle_add_knuckle(Runtime.Handle, Runtime.KnuckleBrakeTorquePerWheel[Index], &Knuckle);
 		liminal_vehicle_add_wheel(
 			Runtime.Handle,
 			WheelInertia,
@@ -1406,18 +1528,10 @@ bool UCirrovaVehicleComponent::BuildTopology(FCirrovaVehicleRuntime& Runtime)
 			return false;
 		}
 
-		// 不可转向的车轮不接转向信号，端口保持零值。
-		if (Config.bSteerable
-			&& !Connect(
-				Runtime.Handle,
-				PortOf(Runtime.Handle, SteeringSplitter, static_cast<uint32>(Index) + 1),
-				PortOf(Runtime.Handle, Knuckle, 2)
-			)) { return false; }
-		if (!Connect(
-			Runtime.Handle,
-			PortOf(Runtime.Handle, BrakeSplitter, static_cast<uint32>(Index) + 1),
-			PortOf(Runtime.Handle, Knuckle, 3)
-		)) { return false; }
+		// 转向与制动信号逐轮直写：捕获端口；不可转向轮转向端口保持零值。
+		Runtime.SteeringSignalPorts[Index] = PortOf(Runtime.Handle, Knuckle, 2);
+		Runtime.BrakeSignalPorts[Index] = PortOf(Runtime.Handle, Knuckle, 3);
+		Runtime.DrivenWheels[Index] = WheelDrivePorts[Index] != 0;
 
 		SuspensionNodes.Add(Suspension);
 		KnuckleNodes.Add(Knuckle);
@@ -1531,7 +1645,6 @@ bool UCirrovaVehicleComponent::ReadSpatialLinks(
 		{
 			FCirrovaWheelRuntime& Wheel = Runtime.Wheels[WheelIndex];
 			const FTransform Pose = LiminalPoseToUE(Link.PoseInRoot);
-			Wheel.SteeringPort = Link.HasControl ? Link.ControlPort : 0;
 			// 关节轴在子节点本地系（liminal）；Pose.GetRotation() 已含基变换与子到根旋转。
 			const FVector AxisLiminal(
 				Link.Joint.Axis.X,

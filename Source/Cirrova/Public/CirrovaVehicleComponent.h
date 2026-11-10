@@ -68,13 +68,46 @@ struct FCirrovaWheelState
 	)
 	float EffectiveInertia = 0.0f;
 
-	// 轮胎约束当前的轮端惯量消元项 R²/J（1/kg）；制动锁止或未启用时为 0。
+	// 轮胎约束当前的轮端惯量消元项 R²/J（1/kg）；未启用时为 0。
 	UPROPERTY(
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|遥测",
 		meta = (DisplayName = "轮端惯量消元项 (1/kg)")
 	)
 	float ConstraintWheelInverseMass = 0.0f;
+
+	// 锁止观测：本步约束求解后轮端静止且制动容量非零；锁止由制动行与轮胎行
+	// 竞争涌现，不再是输入判据。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "车轮锁止")
+	)
+	bool bWheelLocked = false;
+
+	// 本步制动扭矩容量（N·m）：脚刹（含 ABS 调制）与手刹取较大值。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "制动扭矩容量 (N·m)")
+	)
+	float BrakeTorqueCapacity = 0.0f;
+
+	// 转向节当前转向角（度，liminal 约定正值为右转）。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "转向角 (deg)")
+	)
+	float SteeringAngleDegrees = 0.0f;
+
+	// ABS 制动调制（[0,1]）；1 为全压。
+	UPROPERTY(
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|遥测",
+		meta = (DisplayName = "ABS 调制")
+	)
+	float ABSModulation = 1.0f;
 
 #pragma endregion
 
@@ -207,7 +240,7 @@ struct FCirrovaWheelState
 	)
 	float CompressionVelocity = 0.0f;
 
-	// 原始压缩速度是否超过 ±2 m/s 钳制。
+	// 外力回退路径的原始压缩速度是否超过 ±2 m/s 钳制；原生约束路径不钳制。
 	UPROPERTY(
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|遥测",
@@ -650,6 +683,31 @@ struct FCirrovaEngineCurvePoint
 	float TorqueScale = 1.0f;
 };
 
+/** 发动机制动扭矩曲线采样点。 */
+USTRUCT(BlueprintType)
+struct FCirrovaEngineBrakingPoint
+{
+	GENERATED_BODY()
+
+	// 采样点转速（RPM）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "转速")
+	)
+	float RPM = 0.0f;
+
+	// 该转速下的发动机制动扭矩（N·m，非负）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "制动扭矩 (N·m)")
+	)
+	float Torque = 0.0f;
+};
+
 /** 驱动布局：按挂点前后坐标自动划分前/后轴。 */
 UENUM(BlueprintType)
 enum class ECirrovaDriveLayout : uint8
@@ -780,14 +838,23 @@ public:
 	)
 	bool bUseDifferential = true;
 
-	// 限滑摩擦约束的扭矩容量（N·m）；0 为纯开式差速，越大越接近锁止。
+	// 前轴差速器限滑摩擦约束的扭矩容量（N·m）；0 为纯开式差速，越大越接近锁止。
 	UPROPERTY(
 		EditAnywhere,
 		BlueprintReadOnly,
 		Category = "Cirrova载具组件|动力",
-		meta = (DisplayName = "差速器限滑扭矩容量")
+		meta = (DisplayName = "前轴差速器限滑扭矩容量")
 	)
-	float DifferentialMaxTorque = 100.0f;
+	float FrontDifferentialMaxTorque = 100.0f;
+
+	// 后轴差速器限滑摩擦约束的扭矩容量（N·m）；0 为纯开式差速。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "后轴差速器限滑扭矩容量")
+	)
+	float RearDifferentialMaxTorque = 100.0f;
 
 	// 驱动布局：按挂点前后坐标（UE +X 为前）自动划分前/后轴。
 	UPROPERTY(
@@ -834,7 +901,7 @@ public:
 	)
 	float WheelFrictionTorque = 5.0f;
 
-	// 制动器最大扭矩（N·m）。
+	// 制动器最大扭矩（N·m），按前后轴比例分配到各转向节。
 	UPROPERTY(
 		EditAnywhere,
 		BlueprintReadOnly,
@@ -842,6 +909,177 @@ public:
 		meta = (DisplayName = "制动器最大扭矩")
 	)
 	float MaxBrakeTorque = 2000.0f;
+
+	// 前轴制动扭矩比例（挂点 X ≥ 0 为前轴）；默认 1 表示与后轴等扭矩。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "前轴制动扭矩比例")
+	)
+	float FrontBrakeTorqueScale = 1.0f;
+
+	// 后轴制动扭矩比例。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "后轴制动扭矩比例")
+	)
+	float RearBrakeTorqueScale = 1.0f;
+
+	// 防抱死制动（ABS）：逐轮按纵向滑移率泄压/建压。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|驾驶辅助",
+		meta = (DisplayName = "防抱死制动")
+	)
+	bool bEnableABS = false;
+
+	// ABS 进入泄压的滑移率阈值（绝对值）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|驾驶辅助",
+		meta = (DisplayName = "ABS 泄压滑移阈值")
+	)
+	float ABSSlipThreshold = 0.3f;
+
+	// ABS 回抓建压的滑移率阈值（绝对值，须小于泄压阈值）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|驾驶辅助",
+		meta = (DisplayName = "ABS 建压滑移阈值")
+	)
+	float ABSReleaseThreshold = 0.15f;
+
+	// ABS 泄压速率（每秒，满压 → 零压）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|驾驶辅助",
+		meta = (DisplayName = "ABS 泄压速率")
+	)
+	float ABSReleaseRate = 40.0f;
+
+	// ABS 建压速率（每秒，零压 → 满压）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|驾驶辅助",
+		meta = (DisplayName = "ABS 建压速率")
+	)
+	float ABSApplyRate = 60.0f;
+
+	// ABS 最低生效车速（m/s）；低于该车速允许全压抱死停车。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|驾驶辅助",
+		meta = (DisplayName = "ABS 最低生效车速")
+	)
+	float ABSMinSpeed = 2.0f;
+
+	// 牵引力控制（TCS）：驱动轮空转滑移超阈时衰减油门。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|驾驶辅助",
+		meta = (DisplayName = "牵引力控制")
+	)
+	bool bEnableTCS = false;
+
+	// TCS 触发的驱动轮滑移率阈值。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|驾驶辅助",
+		meta = (DisplayName = "TCS 滑移阈值")
+	)
+	float TCSSlipThreshold = 0.2f;
+
+	// TCS 油门调制速率（每秒）。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|驾驶辅助",
+		meta = (DisplayName = "TCS 调制速率")
+	)
+	float TCSReleaseRate = 10.0f;
+
+	// 阿克曼转向：内外前轮按转弯半径分配转角；关闭则所有可转向轮用同一目标角。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|操控",
+		meta = (DisplayName = "阿克曼转向")
+	)
+	bool bEnableAckermannSteering = true;
+
+	// 转向速率限制（度/秒，参考转向角的变化速率）；0 表示不限。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|操控",
+		meta = (DisplayName = "转向速率限制 (deg/s)")
+	)
+	float SteeringRateLimit = 540.0f;
+
+	// 手刹最大扭矩（N·m）；默认仅作用于后轴。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "手刹最大扭矩 (N·m)")
+	)
+	float MaxHandbrakeTorque = 2000.0f;
+
+	// 手刹仅作用于后轴；关闭则四轮同时施加。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "手刹仅后轴")
+	)
+	bool bHandbrakeRearOnly = true;
+
+	// 使用发动机制动曲线（适配层注入）；启用时关闭 liminal 内置的线性发动机制动。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "发动机制动曲线")
+	)
+	bool bUseEngineBrakingCurve = false;
+
+	// 发动机制动曲线：转速 → 制动扭矩（N·m）；为空时使用内置默认曲线。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "发动机制动曲线采样")
+	)
+	TArray<FCirrovaEngineBrakingPoint> EngineBrakingCurve{};
+
+	// 扭矩矢量：按转向输入在驱动力矩上叠加左右差扭。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "扭矩矢量")
+	)
+	bool bEnableTorqueVectoring = false;
+
+	// 扭矩矢量强度（N·m）：满转向、满油门时的单轮附加力矩。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|动力",
+		meta = (DisplayName = "扭矩矢量强度 (N·m)")
+	)
+	float TorqueVectoringStrength = 300.0f;
 
 	// 车轮接触检测探针：射线、球体扫掠或圆柱包络。
 	UPROPERTY(
@@ -869,6 +1107,15 @@ public:
 		meta = (DisplayName = "允许物理休眠")
 	)
 	bool bAllowPhysicsSleep = true;
+
+	// 强制悬挂走射线弹簧回退路径（忽略地面代理类型），用于验证 Landscape/非单粒子代理回退。仅初始化时读取。
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadOnly,
+		Category = "Cirrova载具组件|物理",
+		meta = (DisplayName = "强制悬挂回退")
+	)
+	bool bForceSuspensionFallback = false;
 
 	// 防倾杆：每项连接一对车轮，刚度 0 表示禁用。
 	UPROPERTY(
@@ -1098,6 +1345,7 @@ private:
 	float ThrottleInput = 0.0f;
 	float SteeringInput = 0.0f;
 	float BrakeInput = 0.0f;
+	float HandbrakeInput = 0.0f;
 	int32 GearInput = 1;
 
 	// 上一帧是否有任一车轮接地。
@@ -1203,6 +1451,14 @@ public:
 		meta = (DisplayName = "设置制动")
 	)
 	void SetBrake(float Value);
+
+	// 设置手刹输入 [0, 1]。
+	UFUNCTION(
+		BlueprintCallable,
+		Category = "Cirrova载具组件|API",
+		meta = (DisplayName = "设置手刹")
+	)
+	void SetHandbrake(float Value);
 
 	// 设置挡位：0 为空挡，k 选择第 k 个传动比。
 	UFUNCTION(

@@ -16,7 +16,7 @@ class FCirrovaWheelFrictionConstraints;
  * 单轮轮胎摩擦约束的求解输入。
  *
  * 世界坐标系，长度与位置为厘米，力为 kg·cm/s²。纵向与侧向共用摩擦椭圆界：
- * 坐标块迭代先求解纵向，再按剩余半轴长度求解侧向。
+ * 坐标块迭代先求解纵向，再按剩余半轴长度求解侧向；制动行在每轮末尾收尾。
  */
 struct FCirrovaWheelFrictionSettings
 {
@@ -30,17 +30,22 @@ struct FCirrovaWheelFrictionSettings
 	// 接触点地面速度（cm/s），含地面刚体的平动与转动贡献。
 	Chaos::FVec3 GroundVelocity{0.0f, 0.0f, 0.0f};
 
-	// 松弛后的轮面线速度（cm/s），纵向约束的目标速度组成部分。
-	float WheelSurfaceSpeed = 0.0f;
+	// 本物理步开始时的轮端角速度（rad/s），来自 liminal 上一步回读；
+	// 约束在迭代内维护本地副本，制动与轮胎反作用实时更新它。
+	float WheelAngularVelocity = 0.0f;
 
 	// 车轮半径（cm）与轮端等效转动惯量（kg·cm²）。
 	// 纵向约束用 J_eff 把轮端自由度消元进有效质量：R²/J 与底盘接触点逆质量相加。
 	float WheelRadiusCm = 0.0f;
 	float WheelInertiaKgCm2 = 0.0f;
 
-	// 制动器可在轮胎扭矩范围内锁止车轮；true 时轮端逆惯量按 0 处理，
-	// 纵向冲量按纯底盘求解，轮端反作用由一维域制动器承担。
-	bool bWheelLocked = false;
+	// 本步制动扭矩容量（N·m）：逐轮容量 × 调制后的制动信号；0 为无制动。
+	// 制动作为轮端 DOF 的速度约束行进入求解器，锁止由容量对比涌现。
+	float BrakeTorqueCapacity = 0.0f;
+
+	// 纵向松弛后的轮面线速度目标（cm/s）。
+	// 松弛语义与轮胎模型一致：过滤的是轮胎力建立目标，不是轮端 DOF 本身。
+	float RelaxedWheelSurfaceSpeed = 0.0f;
 
 	// 纵向摩擦椭圆长轴界（kg·cm/s²）。
 	float LongitudinalForceLimit = 0.0f;
@@ -58,6 +63,10 @@ struct FCirrovaWheelFrictionResults
 	// 对底盘施加的纵向与侧向冲量（kg·cm/s）。
 	float LongitudinalImpulse = 0.0f;
 	float LateralImpulse = 0.0f;
+
+	// 轮端角冲量（kg·cm²/s）：轮胎反作用（-λ·R）与制动之和，PostSolve
+	// 换算为净力矩回注一维域。
+	float WheelAngularImpulse = 0.0f;
 
 	// 累计的求解步长（s）。
 	float FrameDeltaTime = 0.0f;
@@ -84,9 +93,10 @@ protected:
  * 轮胎摩擦约束容器：每轮一条约束，在宿主求解器的速度迭代内求解。
  *
  * 纵向约束把轮端等效惯量 J_eff 消元进标量有效质量，冲量同时决定底盘速度增量
- * 与轮端反作用力矩；侧向约束仍只作用于底盘。车轮角速度由一维动力流积分，
- * 反作用冲量在同一物理步的 PostSolve 以力矩回注。容器必须随求解器生存期存在：
- * 注册后不可移除，销毁前须确保求解器已停止步进。
+ * 与轮端反作用力矩；制动作为第二条作用于轮端的角冲量约束行进入同一迭代，
+ * 锁止由制动行与轮胎行的容量对比涌现。侧向约束仍只作用于底盘。车轮角速度
+ * 由一维动力流积分，净角冲量在同一物理步的 PostSolve 以力矩回注。容器必须
+ * 随求解器生存期存在：注册后不可移除，销毁前须确保求解器已停止步进。
  *
  * 直接继承约束容器基类而不使用索引容器模板：模板的内联构造函数会把其中间基类
  * 虚表实例化到本模块，而虚表中未覆写的槽位指向引擎未导出的实现。
@@ -141,8 +151,12 @@ public:
 	// 仍绑定粒子的约束数量。
 	int32 NumActiveConstraints() const;
 
-	// 指定约束当前的轮端惯量消元项 R²/J（1/kg）；锁止或未启用时为 0。
+	// 指定约束当前的轮端惯量消元项 R²/J（1/kg）；未启用时为 0。
 	float GetWheelInverseMass(int32 ConstraintIndex) const;
+
+	// 锁止观测：本步求解后轮端静止（|ω| < 0.5 rad/s）且制动容量非零；
+	// 锁止由制动约束行与轮胎约束行竞争涌现，不再是输入判据。
+	bool IsWheelLocked(int32 ConstraintIndex) const;
 
 	// FPBDConstraintContainer 接口。
 	virtual int32 GetNumConstraints() const override final { return NumConstraints(); }
@@ -183,15 +197,15 @@ public:
 	void ScatterOutput(const TArrayView<int32>& ConstraintIndices, const Chaos::FReal Dt);
 	void ApplyPositionConstraints(
 		const TArrayView<int32>& ConstraintIndices,
-		const Chaos::FReal,
-		const int32,
-		const int32
-	) {}
+		const Chaos::FReal Dt,
+		const int32 Iteration,
+		const int32 NumIterations
+	);
 	void ApplyVelocityConstraints(
 		const TArrayView<int32>& ConstraintIndices,
-		const Chaos::FReal,
-		const int32,
-		const int32
+		const Chaos::FReal Dt,
+		const int32 Iteration,
+		const int32 NumIterations
 	);
 	void ApplyProjectionConstraints(
 		const TArrayView<int32>&,
@@ -204,8 +218,8 @@ public:
 	void AddBodies(Chaos::FSolverBodyContainer& SolverBodyContainer);
 	void GatherInput(const Chaos::FReal Dt);
 	void ScatterOutput(const Chaos::FReal Dt);
-	void ApplyPositionConstraints(const Chaos::FReal, const int32, const int32) {}
-	void ApplyVelocityConstraints(const Chaos::FReal, const int32, const int32);
+	void ApplyPositionConstraints(const Chaos::FReal Dt, const int32 Iteration, const int32 NumIterations);
+	void ApplyVelocityConstraints(const Chaos::FReal Dt, const int32 Iteration, const int32 NumIterations);
 	void ApplyProjectionConstraints(const Chaos::FReal, const int32, const int32) {}
 
 private:
@@ -222,8 +236,29 @@ private:
 		float AccumulatedLongitudinal = 0.0f;
 		float AccumulatedLateral = 0.0f;
 
-		// 轮端惯量消元项 R²/J（1/kg）；0 表示退化为纯底盘约束。
+		// 轮端惯量消元项 R²/J（1/kg）；半径或惯量无效时为 0。
 		float WheelInverseMass = 0.0f;
+
+		// 轮端本地角速度（rad/s）：GatherInput 时初始化为步初值，速度迭代内被
+		// 制动与轮胎纵向反作用持续更新。
+		float LocalOmega = 0.0f;
+
+		// 本物理步累计的轮端角冲量（kg·cm²/s）：轮胎反作用（-λ·R）与制动之和，
+		// PostSolve 换算为净力矩回注一维域。
+		float AccumulatedTireAngularImpulse = 0.0f;
+		float AccumulatedBrakeAngularImpulse = 0.0f;
+
+		// 本物理步制动角冲量界（kg·cm²/s）= 容量（N·m）× dt × 10⁴。
+		float MaxBrakeAngularImpulse = 0.0f;
+
+		// 上一物理步的累计冲量与界：位置级静摩擦的滑动门控。
+		float LastAccumulatedLongitudinal = 0.0f;
+		float LastAccumulatedLateral = 0.0f;
+		float LastMaxLongitudinalImpulse = 0.0f;
+		float LastMaxLateralImpulse = 0.0f;
+
+		// 侧向 warm start：上一步累计侧向冲量的衰减副本，下一步 Gather 时预施加。
+		float WarmStartLateralImpulse = 0.0f;
 
 		int32 OwnerId = INDEX_NONE;
 		int32 LastSeenFrame = -1;
@@ -234,6 +269,7 @@ private:
 	};
 
 	void ApplySingle(int32 ConstraintIndex);
+	void ApplyPositionSingle(int32 ConstraintIndex, float Dt, int32 Iteration, int32 NumIterations);
 	void AddBody(int32 ConstraintIndex, Chaos::FSolverBodyContainer& SolverBodyContainer);
 	void GatherSingle(int32 ConstraintIndex, float Dt);
 	void ScatterSingle(int32 ConstraintIndex, float Dt);

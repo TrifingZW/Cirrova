@@ -39,4 +39,24 @@ else
     echo "未找到 summary.txt：$OUT_DIR/summary.txt" >&2
 fi
 
+PASSED=0
+FAILED=0
+if [ -f "$OUT_DIR/summary.txt" ]; then
+    PASSED=$(grep -cE '^T[0-9]+ PASS ' "$OUT_DIR/summary.txt")
+    FAILED=$(grep -cE '^T[0-9]+ FAIL ' "$OUT_DIR/summary.txt")
+fi
+echo
+echo "场景 $((PASSED + FAILED))：通过 $PASSED，失败 $FAILED"
+
+LOG="$PROJECT_ROOT/Saved/Logs/Vehicle.log"
+PLUGIN_ISSUES=0
+if [ -f "$LOG" ]; then
+    PLUGIN_ISSUES=$(grep -cE 'LogCirrova: (Warning|Error):' "$LOG")
+fi
+echo "LogCirrova 告警/错误：$PLUGIN_ISSUES"
+
+if [ "$FAILED" -gt 0 ] || [ "$PLUGIN_ISSUES" -gt 0 ]; then
+    exit 1
+fi
+
 exit "$EXIT_CODE"

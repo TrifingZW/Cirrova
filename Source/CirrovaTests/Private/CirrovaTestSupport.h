@@ -33,6 +33,8 @@ namespace CirrovaTestSupport
 		float MeanLongitudinalForce = 0.0f;
 		float MeanAbsOmega = 0.0f;
 		float MeanConstraintWheelInverseMass = 0.0f;
+		// 锁止帧占比：bWheelLocked 为真的采样比例。
+		float LockedFraction = 0.0f;
 		float MaxAbsLateralForce = 0.0f;
 		float MaxAbsLongitudinalForce = 0.0f;
 	};
@@ -98,6 +100,7 @@ namespace CirrovaTestSupport
 			Stat.MeanLongitudinalForce += Wheel.TireLongitudinalForce;
 			Stat.MeanAbsOmega += FMath::Abs(Wheel.Omega);
 			Stat.MeanConstraintWheelInverseMass += Wheel.ConstraintWheelInverseMass;
+			Stat.LockedFraction += Wheel.bWheelLocked ? 1.0f : 0.0f;
 			Stat.MaxAbsLateralForce = FMath::Max(Stat.MaxAbsLateralForce, FMath::Abs(Wheel.TireLateralForce));
 			Stat.MaxAbsLongitudinalForce =
 				FMath::Max(Stat.MaxAbsLongitudinalForce, FMath::Abs(Wheel.TireLongitudinalForce));
@@ -125,6 +128,7 @@ namespace CirrovaTestSupport
 		Stat.MeanLongitudinalForce *= InvCount;
 		Stat.MeanAbsOmega *= InvCount;
 		Stat.MeanConstraintWheelInverseMass *= InvCount;
+		Stat.LockedFraction *= InvCount;
 		return Stat;
 	}
 

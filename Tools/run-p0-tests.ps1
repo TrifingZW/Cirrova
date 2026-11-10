@@ -18,12 +18,17 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Scenario = "all",
+    [string[]]$Scenario = @("all"),
     [string]$UE = "C:\Program Files\Epic Games\UE_5.8",
     [string]$OutputDir = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+# 多场景参数在 PowerShell 下会绑定为数组，拼接为引擎接受的逗号分隔列表。
+$ScenarioList = @($Scenario | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($ScenarioList.Count -eq 0) { $ScenarioList = @("all") }
+$ScenarioText = $ScenarioList -join ","
 
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $Project = Join-Path $ProjectRoot "Vehicle.uproject"
@@ -49,13 +54,13 @@ $Arguments = @(
     "-Deterministic",
     "-FPS=60",
     "-map=/Engine/Maps/Entry",
-    "-CirrovaTest=$Scenario",
+    "-CirrovaTest=$ScenarioText",
     "-CirrovaTestOut=$OutputDir",
     "-CirrovaTestExit=1"
 )
 
 Write-Host "Cirrova P0 自动化验证"
-Write-Host "  场景：$Scenario"
+Write-Host "  场景：$ScenarioText"
 Write-Host "  输出：$OutputDir"
 Write-Host ""
 
@@ -68,6 +73,30 @@ if (Test-Path $Summary) {
 }
 else {
     Write-Warning "未找到 summary.txt：$Summary"
+}
+
+$Report = Join-Path $OutputDir "report.json"
+if (-not (Test-Path $Report)) {
+    Write-Warning "未找到 report.json：$Report"
+    exit $ExitCode
+}
+
+$Data = Get-Content -LiteralPath $Report -Raw | ConvertFrom-Json
+$Scenarios = @($Data.scenarios)
+$Passed = @($Scenarios | Where-Object { $_.passed }).Count
+$Failed = @($Scenarios | Where-Object { -not $_.passed })
+
+Write-Host ""
+Write-Host ("场景 {0}：通过 {1}，失败 {2}" -f $Scenarios.Count, $Passed, $Failed.Count)
+foreach ($Item in $Failed) {
+    Write-Host ("  失败 {0}：{1}" -f $Item.name, $Item.summary)
+}
+
+$PluginErrors = @(Select-String -Path (Join-Path $ProjectRoot "Saved\Logs\Vehicle.log") -Pattern 'LogCirrova: (Warning|Error):' -ErrorAction SilentlyContinue)
+Write-Host ("LogCirrova 告警/错误：{0}" -f $PluginErrors.Count)
+
+if (-not $Data.all_passed -or $PluginErrors.Count -gt 0) {
+    exit 1
 }
 
 exit $ExitCode

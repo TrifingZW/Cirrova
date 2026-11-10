@@ -94,7 +94,15 @@ void CirrovaTest::GetScenarioNames(TArray<FString>& OutNames)
 		TEXT("T11"),
 		TEXT("T12"),
 		TEXT("T13"),
-		TEXT("T14")
+		TEXT("T14"),
+		TEXT("T15"),
+		TEXT("T16"),
+		TEXT("T17"),
+		TEXT("T18"),
+		TEXT("T19"),
+		TEXT("T20"),
+		TEXT("T21"),
+		TEXT("T22")
 	};
 }
 
@@ -110,7 +118,10 @@ TUniquePtr<FCirrovaTestScenario> CirrovaTest::CreateScenario(const FString& Name
 	if (TUniquePtr<FCirrovaTestScenario> Scenario = CreateStaticScenario(Name)) { return Scenario; }
 	if (TUniquePtr<FCirrovaTestScenario> Scenario = CreateSlopeScenario(Name)) { return Scenario; }
 	if (TUniquePtr<FCirrovaTestScenario> Scenario = CreateDrivetrainScenario(Name)) { return Scenario; }
-	return CreateSuspensionScenario(Name);
+	if (TUniquePtr<FCirrovaTestScenario> Scenario = CreateSuspensionScenario(Name)) { return Scenario; }
+	if (TUniquePtr<FCirrovaTestScenario> Scenario = CreateBrakingScenario(Name)) { return Scenario; }
+	if (TUniquePtr<FCirrovaTestScenario> Scenario = CreateFallbackScenario(Name)) { return Scenario; }
+	return CreateDrivingScenario(Name);
 }
 
 #pragma endregion

@@ -10,7 +10,6 @@
 #include "Chaos/PhysicsObjectCollisionInterface.h"
 #include "Chaos/Sphere.h"
 #include "HAL/PlatformTime.h"
-#include "Chaos/PhysicsObjectCollisionInterface.h"
 #include "Chaos/PhysicsObjectInternalInterface.h"
 #include "Chaos/Particle/ParticleUtilities.h"
 // FPhysicsObject 的完整定义位于 Chaos 私有头；物理对象查询需要其成员访问。
@@ -28,8 +27,12 @@ namespace
 	constexpr float MaxSubstepDeltaTime = 0.0025f;
 	constexpr int32 MaxSubstepsPerTick = 32;
 
-	// 阻尼压缩速度钳制（m/s），等效减振器泄压阀，防止落地帧产生过大冲量。
+	// 阻尼压缩速度钳制（m/s）：仅用于外力回退路径的显式耦合稳定性，等效减振器泄压阀。
+	// 原生悬挂约束的刚度/阻尼由求解器位置迭代承担，不使用该钳制。
 	constexpr float MaxCompressionVelocity = 2.0f;
+
+	// 原生路径的压缩速度数值防护上限（m/s）：仅防止遥测出现荒谬值，不参与动力学。
+	constexpr float MaxNativeCompressionVelocity = 20.0f;
 
 	// 滑移归一化参考速度（m/s），低于该值按该值归一，避免低速除零。
 	constexpr float SlipReferenceSpeed = 1.0f;
@@ -39,6 +42,9 @@ namespace
 
 	// 地面材质摩擦系数上限，避免异常物理材质产生非物理抓地。
 	constexpr float MaxSurfaceFriction = 2.0f;
+
+	// ABS 泄压下限：保留少量制动压力，避免完全释放后距离严重增加。
+	constexpr float AbsMinModulation = 0.1f;
 
 	// 车轮接触的最大坡面角（80°），避免把垂直墙面当作可支撑地面。
 	constexpr float MaxContactSlopeCos = 0.173648f;
@@ -103,6 +109,178 @@ namespace
 		Model.RollingResistance = Runtime.TireRollingResistance;
 		Model.StaticFrictionScale = Runtime.TireStaticFrictionScale * StaticRatio;
 		return Model;
+	}
+
+	/** 发动机制动曲线插值；曲线为空时返回 0。 */
+	float EvaluateEngineBrakingCurve(const FCirrovaVehicleRuntime& Runtime, const float RPM)
+	{
+		const TArray<FCirrovaEngineBrakingRuntimePoint>& Curve = Runtime.EngineBrakingCurve;
+		if (Curve.IsEmpty() || !FMath::IsFinite(RPM) || RPM <= 0.0f) { return 0.0f; }
+		if (RPM <= Curve[0].RPM) { return Curve[0].Torque; }
+
+		for (int32 Index = 1; Index < Curve.Num(); ++Index)
+		{
+			if (RPM > Curve[Index].RPM) { continue; }
+			const float Span = Curve[Index].RPM - Curve[Index - 1].RPM;
+			const float Alpha = Span > KINDA_SMALL_NUMBER
+				? (RPM - Curve[Index - 1].RPM) / Span
+				: 1.0f;
+			return FMath::Lerp(Curve[Index - 1].Torque, Curve[Index].Torque, Alpha);
+		}
+		return Curve.Last().Torque;
+	}
+
+	/** 参考转向角更新：驾驶输入正值为左转，liminal 信号正值为右转，故取反。 */
+	void UpdateSteeringAngle(
+		FCirrovaVehicleRuntime& Runtime,
+		const float SteeringInput,
+		const float DeltaTime
+	)
+	{
+		const float Target = -FMath::Clamp(SteeringInput, -1.0f, 1.0f) * Runtime.MaxSteeringAngle;
+		if (Runtime.SteeringRateLimitRad > KINDA_SMALL_NUMBER && DeltaTime > 0.0f)
+		{
+			const float MaxDelta = Runtime.SteeringRateLimitRad * DeltaTime;
+			Runtime.SteeringAngleRad = FMath::Clamp(
+				Target,
+				Runtime.SteeringAngleRad - MaxDelta,
+				Runtime.SteeringAngleRad + MaxDelta
+			);
+		}
+		else
+		{
+			Runtime.SteeringAngleRad = Target;
+		}
+	}
+
+	/**
+	 * 单轮转向角：阿克曼分配按转弯半径给出内外轮差；关闭时所有可转向轮同角。
+	 *
+	 * 参考自行车模型：`tan(δ) = L / R`；liminal 约定正值为右转。
+	 * 内侧轮用较小转弯半径，故转角幅值更大。
+	 */
+	float ComputeWheelSteeringAngle(
+		const FCirrovaVehicleRuntime& Runtime,
+		const FCirrovaWheelRuntime& Wheel
+	)
+	{
+		if (!Wheel.bSteerable) { return 0.0f; }
+
+		const float ReferenceAngle = Runtime.SteeringAngleRad;
+		if (!Runtime.bEnableAckermannSteering
+			|| FMath::Abs(ReferenceAngle) < 1e-4f
+			|| Runtime.Wheels.IsEmpty())
+		{
+			return ReferenceAngle;
+		}
+
+		float RearX = Runtime.Wheels[0].MountLocation.X;
+		float FrontX = RearX;
+		for (const FCirrovaWheelRuntime& Other : Runtime.Wheels)
+		{
+			RearX = FMath::Min(RearX, Other.MountLocation.X);
+			FrontX = FMath::Max(FrontX, Other.MountLocation.X);
+		}
+		const float WheelBase = FrontX - RearX;
+		if (WheelBase <= KINDA_SMALL_NUMBER) { return ReferenceAngle; }
+
+		const float Sign = FMath::Sign(ReferenceAngle);
+		const float AbsRadius = WheelBase / FMath::Abs(FMath::Tan(ReferenceAngle));
+		const float Longitudinal = Wheel.MountLocation.X - RearX;
+		// 内侧轮（与转向方向同侧）距离转向中心更近。
+		const float Denominator = AbsRadius - Sign * Wheel.MountLocation.Y;
+		if (Denominator <= KINDA_SMALL_NUMBER) { return ReferenceAngle; }
+
+		const float WheelAngle = Sign * FMath::Atan(Longitudinal / Denominator);
+		if (!FMath::IsFinite(WheelAngle)) { return ReferenceAngle; }
+		return FMath::Clamp(WheelAngle, -Runtime.MaxSteeringAngle, Runtime.MaxSteeringAngle);
+	}
+
+	/** 逐轮制动信号：脚刹（含 ABS 调制）与手刹取较大容量。信号归一化到转向节容量。 */
+	void ComputeBrakeSignals(
+		FCirrovaVehicleRuntime& Runtime,
+		const FCirrovaVehicleAsyncInput& Input
+	)
+	{
+		const float Brake = FMath::Clamp(Input.Brake, 0.0f, 1.0f);
+		const float Handbrake = FMath::Clamp(Input.Handbrake, 0.0f, 1.0f);
+		for (int32 Index = 0; Index < Runtime.Wheels.Num(); ++Index)
+		{
+			FCirrovaWheelRuntime& Wheel = Runtime.Wheels[Index];
+			const float Base = Runtime.MaxBrakeTorquePerWheel.IsValidIndex(Index)
+				? Runtime.MaxBrakeTorquePerWheel[Index]
+				: 0.0f;
+			const float KnuckleCapacity = Runtime.KnuckleBrakeTorquePerWheel.IsValidIndex(Index)
+				? Runtime.KnuckleBrakeTorquePerWheel[Index]
+				: Base;
+			const float Modulation = Runtime.ABSModulation.IsValidIndex(Index)
+				? Runtime.ABSModulation[Index]
+				: 1.0f;
+			const float FootCapacity = Brake * Modulation * Base;
+
+			// 手刹默认仅作用于后轴（挂点 X < 0）；不做 ABS 调制。
+			const bool bHandbrakeOnWheel = Handbrake > 0.0f
+				&& Runtime.MaxHandbrakeTorque > 0.0f
+				&& (!Runtime.bHandbrakeRearOnly || Wheel.MountLocation.X < 0.0f);
+			const float HandbrakeCapacity = bHandbrakeOnWheel
+				? Handbrake * Runtime.MaxHandbrakeTorque
+				: 0.0f;
+
+			Wheel.BrakeTorqueCapacity = FMath::Max(FootCapacity, HandbrakeCapacity);
+			Wheel.BrakeSignal = KnuckleCapacity > KINDA_SMALL_NUMBER
+				? FMath::Clamp(Wheel.BrakeTorqueCapacity / KnuckleCapacity, 0.0f, 1.0f)
+				: 0.0f;
+		}
+	}
+
+	/** 扭矩矢量：左转时右侧驱动轮增加正扭矩，左侧反向。 */
+	float ComputeVectoringTorque(
+		const FCirrovaVehicleRuntime& Runtime,
+		const FCirrovaWheelRuntime& Wheel,
+		const int32 WheelIndex
+	)
+	{
+		if (!Runtime.bEnableTorqueVectoring
+			|| Runtime.TorqueVectoringStrength <= 0.0f
+			|| !Runtime.DrivenWheels.IsValidIndex(WheelIndex)
+			|| !Runtime.DrivenWheels[WheelIndex])
+		{
+			return 0.0f;
+		}
+		const float Steering = FMath::Clamp(Runtime.LastSteeringInput, -1.0f, 1.0f);
+		const float Throttle = FMath::Clamp(Runtime.LastThrottleInput, 0.0f, 1.0f);
+		if (FMath::Abs(Steering) < KINDA_SMALL_NUMBER || Throttle <= 0.0f) { return 0.0f; }
+
+		const float Side = Wheel.MountLocation.Y >= 0.0f ? 1.0f : -1.0f;
+		return Side * Steering * Throttle * Runtime.TorqueVectoringStrength;
+	}
+
+	/** 发动机制动曲线注入：仅在油门关闭且转速高于怠速时施加反向扭矩。 */
+	void ApplyEngineBrakingCurve(FCirrovaVehicleRuntime& Runtime, const float ThrottleInput)
+	{
+		if (!Runtime.bUseEngineBrakingCurve || Runtime.EngineShaftPort == 0) { return; }
+		if (FMath::Clamp(ThrottleInput, 0.0f, 1.0f) > 0.02f) { return; }
+
+		float Omega = 0.0f;
+		if (liminal_vehicle_read_omega(Runtime.Handle, Runtime.EngineShaftPort, &Omega)
+			!= ELiminalStatus::Ok)
+		{
+			return;
+		}
+		if (!FMath::IsFinite(Omega)) { return; }
+
+		const float AbsOmega = FMath::Abs(Omega);
+		if (AbsOmega <= Runtime.EngineIdleAngularVelocity) { return; }
+
+		const float RPM = AbsOmega * 60.0f / (2.0f * PI);
+		const float Torque = EvaluateEngineBrakingCurve(Runtime, RPM);
+		if (Torque <= 0.0f || !FMath::IsFinite(Torque)) { return; }
+
+		liminal_vehicle_write_torque(
+			Runtime.Handle,
+			Runtime.EngineShaftPort,
+			-FMath::Sign(Omega) * Torque
+		);
 	}
 
 	/** 低速静摩擦权重：1 为静止，0 为完全滑动。 */
@@ -171,6 +349,109 @@ namespace
 		}
 	}
 
+	/**
+	 * ABS/TCS 逐轮调制：输入为上一步遥测，物理线程每步更新。
+	 *
+	 * ABS：制动中且车速高于门限时，纵向滑移率（负值为拖滑）超过进入阈即泄压，
+	 * 回落到退出阈以下后建压；迟滞与速率限制避免极限环。
+	 * TCS：驱动轮正滑移超过阈值时衰减油门。
+	 */
+	void UpdateTractionControls(
+		FCirrovaVehicleRuntime& Runtime,
+		const FVector& LinearVelocity,
+		const float BrakeInput,
+		const float DeltaTime
+	)
+	{
+		const float SafeDt = FMath::IsFinite(DeltaTime) && DeltaTime > 0.0f ? DeltaTime : 0.0f;
+		if (Runtime.ABSModulation.Num() != Runtime.Wheels.Num())
+		{
+			Runtime.ABSModulation.Init(1.0f, Runtime.Wheels.Num());
+		}
+
+		const float SpeedMs = LinearVelocity.Size() * CentimeterToMeter;
+		const float Brake = FMath::Clamp(BrakeInput, 0.0f, 1.0f);
+		for (int32 Index = 0; Index < Runtime.Wheels.Num(); ++Index)
+		{
+			const FCirrovaWheelRuntime& Wheel = Runtime.Wheels[Index];
+			float& Modulation = Runtime.ABSModulation[Index];
+			const bool bAbsActive = Runtime.bEnableABS
+				&& Brake > 0.0f
+				&& Wheel.bInContact
+				&& SpeedMs > Runtime.ABSMinSpeed;
+
+			if (!bAbsActive)
+			{
+				Modulation = FMath::Min(Modulation + Runtime.ABSApplyRate * SafeDt, 1.0f);
+			}
+			else if (Wheel.SlipRatio < -Runtime.ABSSlipThreshold)
+			{
+				Modulation = FMath::Max(
+					Modulation - Runtime.ABSReleaseRate * SafeDt,
+					AbsMinModulation
+				);
+			}
+			else if (Wheel.SlipRatio > -Runtime.ABSReleaseThreshold)
+			{
+				Modulation = FMath::Min(Modulation + Runtime.ABSApplyRate * SafeDt, 1.0f);
+			}
+		}
+
+		// TCS：驱动轮正滑移（空转）超阈时衰减油门。
+		bool bDrivenSlip = false;
+		if (Runtime.bEnableTCS && FMath::Clamp(Runtime.TCSModulation, 0.0f, 1.0f) > 0.0f)
+		{
+			for (int32 Index = 0; Index < Runtime.Wheels.Num(); ++Index)
+			{
+				const FCirrovaWheelRuntime& Wheel = Runtime.Wheels[Index];
+				const bool bDriven = Runtime.DrivenWheels.IsValidIndex(Index)
+					&& Runtime.DrivenWheels[Index];
+				if (bDriven && Wheel.bInContact
+					&& Wheel.SlipRatio > Runtime.TCSSlipThreshold)
+				{
+					bDrivenSlip = true;
+					break;
+				}
+			}
+		}
+		if (bDrivenSlip)
+		{
+			Runtime.TCSModulation = FMath::Max(
+				Runtime.TCSModulation - Runtime.TCSReleaseRate * SafeDt,
+				0.0f
+			);
+		}
+		else
+		{
+			Runtime.TCSModulation = FMath::Min(
+				Runtime.TCSModulation + Runtime.TCSReleaseRate * SafeDt,
+				1.0f
+			);
+		}
+	}
+
+	/** 逐轮写入转向节制动信号；约束形态下由求解器承担制动的轮写 0。 */
+	void WriteBrakeSignals(const FCirrovaVehicleRuntime& Runtime, const bool bConstraintCoupling)
+	{
+		if (Runtime.BrakeSignalPorts.Num() != Runtime.Wheels.Num()) { return; }
+
+		for (int32 Index = 0; Index < Runtime.Wheels.Num(); ++Index)
+		{
+			const FCirrovaWheelRuntime& Wheel = Runtime.Wheels[Index];
+			const uint64 Port = Runtime.BrakeSignalPorts[Index];
+			if (Port == 0) { continue; }
+
+			// 求解器制动行承担的轮写 0，其余（离地、载荷为零、外力回退）
+			// 由一维域转向节摩擦约束承担制动。
+			const bool bSolverOwnsBrake = bConstraintCoupling && Wheel.bTireConstraintApplied;
+			liminal_vehicle_write_signal(
+				Runtime.Handle,
+				Port,
+				bSolverOwnsBrake ? 0.0f : Wheel.BrakeSignal
+			);
+		}
+	}
+
 	/** 解析底盘粒子；非单粒子代理或已销毁时返回空。 */
 	FPBDRigidParticleHandle* ResolveParticle(IPhysicsProxyBase* Proxy)
 	{
@@ -208,8 +489,8 @@ namespace
 		const FVector& LinearVelocity,
 		const FVector& AngularVelocity,
 		const FVector& CenterOfMass,
-		const float SteeringAngle,
 		const ECirrovaWheelProbeMode ProbeMode,
+		const bool bForceSuspensionFallback,
 		FCirrovaWheelRuntime& Wheel
 	)
 	{
@@ -232,7 +513,7 @@ namespace
 		if (SteeringAxis.IsNearlyZero()) { SteeringAxis = ChassisUp; }
 		const FQuat SteeringRotation(
 			SteeringAxis,
-			Wheel.bSteerable ? SteeringAngle : 0.0f
+			Wheel.bSteerable ? Wheel.SteeringAngleRad : 0.0f
 		);
 		const FVector WheelSpinAxis =
 			SteeringRotation.RotateVector(ChassisToWorld.GetUnitAxis(EAxis::Y)).GetSafeNormal();
@@ -384,7 +665,8 @@ namespace
 					Wheel.MaxLength
 				);
 				Wheel.GroundProxy = HitActor ? HitActor->PhysicsProxy() : nullptr;
-				Wheel.bGroundSupportsConstraint = Wheel.GroundProxy
+				Wheel.bGroundSupportsConstraint = !bForceSuspensionFallback
+					&& Wheel.GroundProxy
 					&& Wheel.GroundProxy->GetType() == EPhysicsProxyType::SingleParticleProxy;
 
 				// 动态地面：接触点速度叠加地面刚体的平动与转动贡献。
@@ -524,12 +806,26 @@ namespace
 		if (Wheel.bSolved && DeltaTime > KINDA_SMALL_NUMBER)
 		{
 			const float RawCompressionVelocity = (Compression - Wheel.PreviousCompression) / DeltaTime;
-			Wheel.bCompressionVelocityClamped = FMath::Abs(RawCompressionVelocity) > MaxCompressionVelocity;
-			CompressionVelocity = FMath::Clamp(
-				RawCompressionVelocity,
-				-MaxCompressionVelocity,
-				MaxCompressionVelocity
-			);
+			if (bUseConstraintLength)
+			{
+				// 原生约束：阻尼由求解器承担，保留真实压缩速度（仅数值防护）。
+				CompressionVelocity = FMath::Clamp(
+					RawCompressionVelocity,
+					-MaxNativeCompressionVelocity,
+					MaxNativeCompressionVelocity
+				);
+			}
+			else
+			{
+				// 外力回退：钳制压缩速度以限制落地帧阻尼冲量。
+				Wheel.bCompressionVelocityClamped =
+					FMath::Abs(RawCompressionVelocity) > MaxCompressionVelocity;
+				CompressionVelocity = FMath::Clamp(
+					RawCompressionVelocity,
+					-MaxCompressionVelocity,
+					MaxCompressionVelocity
+				);
+			}
 		}
 		Wheel.CompressionVelocity = CompressionVelocity;
 		Wheel.bUsingConstraintLength = bUseConstraintLength;
@@ -634,6 +930,7 @@ namespace
 	void SolveTire(
 		FCirrovaVehicleRuntime& Runtime,
 		FCirrovaWheelRuntime& Wheel,
+		const int32 WheelIndex,
 		float SubDeltaTime,
 		int32 GroundedWheelCount
 	)
@@ -654,6 +951,7 @@ namespace
 		Wheel.SlipRatio = 0.0f;
 		Wheel.SurfaceSpeed = Wheel.Omega * Wheel.Radius;
 		Wheel.bTireConstraintApplied = false;
+		Wheel.bWheelLocked = false;
 		if (!Wheel.bInContact || Wheel.NormalLoad <= 0.0f) { return; }
 
 		const float LongitudinalSpeed = Wheel.ContactLongitudinalSpeed;
@@ -751,7 +1049,7 @@ namespace
 		liminal_vehicle_write_torque(
 			Runtime.Handle,
 			Wheel.ShaftPort,
-			Wheel.TireForces.WheelTorque
+			Wheel.TireForces.WheelTorque + ComputeVectoringTorque(Runtime, Wheel, WheelIndex)
 		);
 	}
 
@@ -788,11 +1086,13 @@ namespace
 		Wheel.LateralImpulse = 0.0f;
 		Wheel.ImpulseWindow = 0.0f;
 		Wheel.ConstraintWheelInverseMass = 0.0f;
+		Wheel.bWheelLocked = false;
 		if (Wheel.TireConstraintIndex == INDEX_NONE) { return; }
 
 		Wheel.ConstraintWheelInverseMass = Container.IsConstraintEnabled(Wheel.TireConstraintIndex)
 			? Container.GetWheelInverseMass(Wheel.TireConstraintIndex)
 			: 0.0f;
+		Wheel.bWheelLocked = Container.IsWheelLocked(Wheel.TireConstraintIndex);
 
 		const FCirrovaWheelFrictionResults Results =
 			Container.ConsumeFrameResults(Wheel.TireConstraintIndex);
@@ -809,13 +1109,19 @@ namespace
 			Results.LateralImpulse / Results.FrameDeltaTime / MeterToCentimeter;
 		if (!FMath::IsFinite(LongitudinalForce) || !FMath::IsFinite(LateralForce)) { return; }
 
+		// 轮端净角冲量（kg·cm²/s）→ 力矩 N·m：×10⁻⁴ / dt。
+		// 含轮胎反作用与制动角冲量；一维域仅由该净力矩推进轮速。
+		const float WheelTorque = Results.WheelAngularImpulse
+			* 0.0001f / Results.FrameDeltaTime;
+		if (!FMath::IsFinite(WheelTorque)) { return; }
+
 		Wheel.TireForces.Longitudinal = LongitudinalForce;
 		Wheel.TireForces.Lateral = LateralForce;
-		Wheel.TireForces.WheelTorque = -LongitudinalForce * Wheel.Radius;
+		Wheel.TireForces.WheelTorque = WheelTorque;
 
 		Wheel.TireFrictionLongitudinal = LongitudinalForce;
 		Wheel.TireFrictionLateral = LateralForce;
-		Wheel.WheelTorque = Wheel.TireForces.WheelTorque;
+		Wheel.WheelTorque = WheelTorque;
 		const float NormalizedLongitudinal = Wheel.FrictionForceLimit > KINDA_SMALL_NUMBER
 			? LongitudinalForce / Wheel.FrictionForceLimit
 			: 0.0f;
@@ -832,8 +1138,7 @@ namespace
 	void WriteTireConstraint(
 		FCirrovaWheelFrictionConstraints& Container,
 		const FCirrovaVehicleRuntime& Runtime,
-		FCirrovaWheelRuntime& Wheel,
-		float BrakeInput
+		FCirrovaWheelRuntime& Wheel
 	)
 	{
 		FCirrovaWheelFrictionSettings Settings;
@@ -848,6 +1153,9 @@ namespace
 		Wheel.StaticLateralForceLimit = 0.0f;
 		Wheel.KineticFrictionForceLimit = 0.0f;
 		Wheel.KineticLateralForceLimit = 0.0f;
+
+		// 逐轮制动容量已在 ComputeBrakeSignals 中按脚刹/手刹取较大值（N·m）。
+		const float BrakeTorqueCapacity = Wheel.BrakeTorqueCapacity;
 
 		if (Wheel.bInContact && Wheel.NormalLoad > 0.0f
 			&& Wheel.TireConstraintIndex != INDEX_NONE
@@ -873,14 +1181,14 @@ namespace
 				Wheel.NormalLoad
 			);
 
-			const float WheelSurfaceSpeed = Wheel.RelaxedSurfaceSpeed * MeterToCentimeter;
+			const float WheelRelaxedSurfaceSpeed = Wheel.RelaxedSurfaceSpeed * MeterToCentimeter;
 			const bool bValid = FMath::IsFinite(Constraint.LongitudinalLimit)
 				&& FMath::IsFinite(Constraint.LateralLimit)
 				&& FMath::IsFinite(Constraint.StaticLongitudinalLimit)
 				&& FMath::IsFinite(Constraint.StaticLateralLimit)
 				&& FMath::IsFinite(Constraint.LateralForce)
 				&& FMath::IsFinite(Constraint.RollingForce)
-				&& FMath::IsFinite(WheelSurfaceSpeed)
+				&& FMath::IsFinite(WheelRelaxedSurfaceSpeed)
 				&& (Constraint.LongitudinalLimit > 0.0f || Constraint.LateralLimit > 0.0f);
 
 			if (bValid)
@@ -903,19 +1211,17 @@ namespace
 				Settings.LongitudinalAxis = ToChaosVector(Wheel.LongitudinalAxis);
 				Settings.LateralAxis = ToChaosVector(Wheel.LateralAxis);
 				Settings.GroundVelocity = ToChaosVector(Wheel.GroundVelocity);
-				Settings.WheelSurfaceSpeed = WheelSurfaceSpeed;
+				Settings.RelaxedWheelSurfaceSpeed = WheelRelaxedSurfaceSpeed;
+				Settings.WheelAngularVelocity = FMath::IsFinite(Wheel.Omega) ? Wheel.Omega : 0.0f;
 				Settings.WheelRadiusCm = Wheel.Radius * MeterToCentimeter;
 				const float EffectiveInertia = Wheel.EffectiveInertia > KINDA_SMALL_NUMBER
 					? Wheel.EffectiveInertia
 					: Runtime.WheelInertia;
 				Settings.WheelInertiaKgCm2 = FMath::Max(EffectiveInertia, 0.0f)
 					* MeterToCentimeter * MeterToCentimeter;
-				// 制动器扭矩覆盖轮胎扭矩上限时视为锁止；轮端自由度由一维域制动器约束，
-				// 纵向冲量按纯底盘求解，避免制动工况下把车轮当成自由轮而低估制动力。
-				const float BrakeTorqueCapacity = Runtime.MaxBrakeTorque
-					* FMath::Clamp(BrakeInput, 0.0f, 1.0f);
-				Settings.bWheelLocked = BrakeTorqueCapacity
-					>= Constraint.LongitudinalLimit * Wheel.Radius;
+				// 制动扭矩容量作为轮端 DOF 的速度约束行界进入求解器；锁止由制动行与
+				// 轮胎行的容量竞争涌现，不再预先判定。
+				Settings.BrakeTorqueCapacity = FMath::Max(BrakeTorqueCapacity, 0.0f);
 				Settings.LongitudinalForceLimit = EffectiveLongitudinalLimit * MeterToCentimeter;
 				Settings.LateralForceLimit = EffectiveLateralLimit * MeterToCentimeter;
 
@@ -959,25 +1265,41 @@ namespace
 			Particle.GetX() + Particle.GetR().RotateVector(Particle.CenterOfMass());
 		const FVector CenterOfMass(CenterOfMassChaos);
 
-		// 输入约定正值为左转；UE 绕 +Z 的正向旋转为右转，故取反。
-		const float SteeringAngle =
-			-FMath::Clamp(Input.Steering, -1.0f, 1.0f) * Runtime.MaxSteeringAngle;
+		// 驾驶输入正值为左转；liminal 车辆坐标系 X=右，转向信号正值为右转，故取反。
+		// 参考转向角受速率限制；阿克曼转角逐轮计算，信号逐轮直写。
+		UpdateSteeringAngle(Runtime, Input.Steering, DeltaTime);
+		const float BrakeInput = FMath::Clamp(Input.Brake, 0.0f, 1.0f);
+		Runtime.LastThrottleInput = FMath::Clamp(Input.Throttle, 0.0f, 1.0f);
+		Runtime.LastSteeringInput = FMath::Clamp(Input.Steering, -1.0f, 1.0f);
+		// ABS/TCS 逐轮调制：输入为上一步遥测，物理线程每步更新。
+		UpdateTractionControls(Runtime, LinearVelocity, BrakeInput, DeltaTime);
+		// 逐轮制动信号与容量：脚刹（含 ABS 调制）与手刹取较大值。
+		ComputeBrakeSignals(Runtime, Input);
+		// 油门经 TCS 调制；挡位直写；转向逐轮直写（阿克曼）。
 		liminal_vehicle_write_signal(
 			Runtime.Handle,
 			Runtime.ThrottleSignalPort,
-			FMath::Clamp(Input.Throttle, 0.0f, 1.0f)
+			Runtime.LastThrottleInput * Runtime.TCSModulation
 		);
-		liminal_vehicle_write_signal(Runtime.Handle, Runtime.SteeringSignalPort, SteeringAngle);
 		liminal_vehicle_write_signal(
 			Runtime.Handle,
 			Runtime.GearSignalPort,
 			static_cast<float>(Input.Gear)
 		);
-		liminal_vehicle_write_signal(
-			Runtime.Handle,
-			Runtime.BrakeSignalPort,
-			FMath::Clamp(Input.Brake, 0.0f, 1.0f)
-		);
+		for (int32 Index = 0; Index < Runtime.Wheels.Num(); ++Index)
+		{
+			FCirrovaWheelRuntime& Wheel = Runtime.Wheels[Index];
+			Wheel.SteeringAngleRad = ComputeWheelSteeringAngle(Runtime, Wheel);
+			if (Runtime.SteeringSignalPorts.IsValidIndex(Index)
+				&& Runtime.SteeringSignalPorts[Index] != 0)
+			{
+				liminal_vehicle_write_signal(
+					Runtime.Handle,
+					Runtime.SteeringSignalPorts[Index],
+					Wheel.SteeringAngleRad
+				);
+			}
+		}
 
 		FReadPhysicsObjectInterface_Internal ReadInterface = FPhysicsObjectInternalInterface::GetRead();
 		FPhysicsObjectCollisionInterface_Internal CollisionInterface{ReadInterface};
@@ -998,8 +1320,8 @@ namespace
 				LinearVelocity,
 				AngularVelocity,
 				CenterOfMass,
-				SteeringAngle,
 				Runtime.WheelProbeMode,
+				Runtime.bForceSuspensionFallback,
 				Wheel
 			);
 		}
@@ -1030,9 +1352,16 @@ namespace
 		}
 
 		// 纵向松弛：对轮面速度做一阶低通，保留稳态抓地同时给出瞬态滞后。
-		for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
+		// 制动标志取逐轮制动信号：仍有制动压力时（含 ABS 释压）重置松弛，避免目标滞后于实际轮速。
+		for (int32 Index = 0; Index < Runtime.Wheels.Num(); ++Index)
 		{
-			UpdateLongitudinalRelaxation(Runtime, Wheel, DeltaTime, Input.Brake > 0.0f);
+			FCirrovaWheelRuntime& Wheel = Runtime.Wheels[Index];
+			UpdateLongitudinalRelaxation(
+				Runtime,
+				Wheel,
+				DeltaTime,
+				Wheel.BrakeSignal > 0.0f
+			);
 		}
 
 		// 原生悬挂约束：以轮心为目标点、接触法线为法向，接地状态决定启用。
@@ -1128,11 +1457,18 @@ namespace
 			BindTireConstraints(Container, Runtime, Input.VehicleId, &Particle);
 
 			// 以本步开始时的轮速写入约束输入；冲量与轮端反作用在 PostSolve 收尾。
-			for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
+			for (int32 Index = 0; Index < Runtime.Wheels.Num(); ++Index)
 			{
-				WriteTireConstraint(Container, Runtime, Wheel, Input.Brake);
+				WriteTireConstraint(
+					Container,
+					Runtime,
+					Runtime.Wheels[Index]
+				);
 			}
 
+			// 权威门控：约束生效的轮由求解器制动行承担，转向节信号写 0；
+			// 离地/载荷为零的轮仍由一维域转向节约束承担。
+			WriteBrakeSignals(Runtime, true);
 			Runtime.bSubstepBudgetExceeded = false;
 		}
 		else
@@ -1149,6 +1485,9 @@ namespace
 				}
 			}
 
+			// 外力回退：制动完全由一维域转向节约束承担，逐轮直写信号。
+			WriteBrakeSignals(Runtime, false);
+
 			// 外力回退：轮胎力与轮速显式交替，子步化压回稳定区。
 			AppliedSubsteps = FMath::Clamp(
 				FMath::CeilToInt(DeltaTime / MaxSubstepDeltaTime),
@@ -1160,10 +1499,14 @@ namespace
 			const float SubDeltaTime = DeltaTime / static_cast<float>(AppliedSubsteps);
 			for (int32 Step = 0; Step < AppliedSubsteps; ++Step)
 			{
-				for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
+				for (int32 Index = 0; Index < Runtime.Wheels.Num(); ++Index)
 				{
-					SolveTire(Runtime, Wheel, SubDeltaTime, GroundedWheelCount);
+					SolveTire(Runtime, Runtime.Wheels[Index], Index, SubDeltaTime, GroundedWheelCount);
 				}
+				ApplyEngineBrakingCurve(
+					Runtime,
+					Runtime.LastThrottleInput * Runtime.TCSModulation
+				);
 				liminal_vehicle_step(Runtime.Handle, SubDeltaTime);
 				for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
 				{
@@ -1216,7 +1559,6 @@ namespace
 			Wheel.SupportForce = FVector::ZeroVector;
 			Wheel.TireForce = FVector::ZeroVector;
 		}
-
 	}
 
 	/** 物理步收尾：消费本步轮胎冲量、回注轮端力矩、推进 1D 域并产出快照。 */
@@ -1232,19 +1574,25 @@ namespace
 		{
 			FCirrovaWheelFrictionConstraints& Container = *WheelConstraints;
 
-			for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
+			for (int32 Index = 0; Index < Runtime.Wheels.Num(); ++Index)
 			{
+				FCirrovaWheelRuntime& Wheel = Runtime.Wheels[Index];
 				ReadTireConstraint(Container, Wheel);
 				if (Wheel.TireConstraintIndex != INDEX_NONE)
 				{
 					liminal_vehicle_write_torque(
 						Runtime.Handle,
 						Wheel.ShaftPort,
-						Wheel.TireForces.WheelTorque
+						Wheel.TireForces.WheelTorque + ComputeVectoringTorque(Runtime, Wheel, Index)
 					);
 				}
 			}
 
+			// 发动机制动曲线在推进一维域前注入（liminal 内置线性制动已关闭）。
+			ApplyEngineBrakingCurve(
+				Runtime,
+				Runtime.LastThrottleInput * Runtime.TCSModulation
+			);
 			liminal_vehicle_step(Runtime.Handle, DeltaTime);
 			for (FCirrovaWheelRuntime& Wheel : Runtime.Wheels)
 			{
@@ -1317,6 +1665,12 @@ namespace
 			WheelOutput.RelaxedSurfaceSpeed = Wheel.RelaxedSurfaceSpeed;
 			WheelOutput.FrictionUtilization = Wheel.FrictionUtilization;
 			WheelOutput.bTireConstraintApplied = Wheel.bTireConstraintApplied;
+			WheelOutput.bWheelLocked = Wheel.bWheelLocked;
+			WheelOutput.BrakeTorqueCapacity = Wheel.BrakeTorqueCapacity;
+			WheelOutput.ABSModulation = Runtime.ABSModulation.IsValidIndex(Index)
+				? Runtime.ABSModulation[Index]
+				: 1.0f;
+			WheelOutput.SteeringAngleDegrees = FMath::RadiansToDegrees(Wheel.SteeringAngleRad);
 			WheelOutput.LongitudinalImpulse = Wheel.LongitudinalImpulse;
 			WheelOutput.LateralImpulse = Wheel.LateralImpulse;
 			WheelOutput.ImpulseWindow = Wheel.ImpulseWindow;
@@ -1449,9 +1803,4 @@ void FCirrovaAsyncCallback::OnPostSolve_Internal()
 
 	Output.PostSolveMs =
 		static_cast<float>((FPlatformTime::Seconds() - PostSolveStartSeconds) * 1000.0);
-}
-
-void FCirrovaAsyncCallback::OnContactModification_Internal(FCollisionContactModifier& Modifier)
-{
-	// 扩展点：接触求解阶段的自定义修正（当前未使用）。
 }
